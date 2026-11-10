@@ -31,7 +31,7 @@ else
 fi
 
 say "3/6 Watcher → $W"
-mkdir -p "$W/pine"
+mkdir -p "$W/pine"; rm -f "$W"/pine/eie_pro_v*.pine "$W"/pine/sk_engine_v*.pine
 for f in eie-watch.mjs mc-worker.mjs ui.html probe-trading.mjs CLAUDE.md package.json; do cp "$REPO/watcher/$f" "$W/$f"; done
 cp "$REPO/scripts/doctor.mjs" "$W/doctor.mjs"
 cp "$REPO/scripts/start.sh" "$W/start.sh"; chmod +x "$W/start.sh"
@@ -63,5 +63,5 @@ Installed. Next:
   ~/eie-watch/start.sh --ui                           live: alerts + dashboard (TradingView open, indicators on chart)
   ~/eie-watch/start.sh --ui --trade tv-dry            fill the Paper Trading order dialog but don't click Place
   ~/eie-watch/start.sh --ui --trade tv --ntfy TOPIC   place Paper Trading orders + phone pushes
-Indicators to paste into TradingView's Pine Editor: ~/eie-watch/pine/eie_pro_v10.pine and sk_engine_v16.pine
+Indicators to paste into TradingView's Pine Editor: ~/eie-watch/pine/eie_pro_v11.pine and sk_engine_v17.pine
 MSG
