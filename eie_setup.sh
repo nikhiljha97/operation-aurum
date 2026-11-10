@@ -1996,7 +1996,7 @@ say "6/6 Done"
 cat <<'MSG'
 Next:
   1. In TradingView: a gold, WTI crude or Bitcoin chart (1m-15m) with your two indicators, EIE PRO and SK SEQ
-     (scripts: pine/eie_pro_v11.pine and pine/sk_engine_v17.pine in the GitHub repo; health check: node ~/eie-watch/doctor.mjs)
+     (scripts: pine/eie_pro_v12.pine and pine/sk_engine_v18.pine in the GitHub repo; health check: node ~/eie-watch/doctor.mjs)
      (SK setting "EIE direction source" = EIE PRO: EIE direction).
   2. Start watching (Mac notifications when EIE PRO / SK SEQ place, move, fill or cancel a limit):
        ~/eie-watch/start.sh
