@@ -31,7 +31,7 @@ cat > "$HOME/eie-watch/eie-watch.mjs" <<'EOF_WATCH'
  *
  * Usage:
  *   node eie-watch.mjs                         # watch the active chart
- *   node eie-watch.mjs --rotate "OANDA:XAUUSD,TVC:USOIL" --dwell 20
+ *   node eie-watch.mjs --rotate "OANDA:XAUUSD,OANDA:WTICOUSD,BITSTAMP:BTCUSD" --dwell 20   # gold · WTI crude · Bitcoin
  *   node eie-watch.mjs --interval 2 --risk 25 --buffer 0.30 --no-notify
  *   node eie-watch.mjs --ntfy my-secret-topic-123 # also push to your phone (free ntfy app)
  *   node eie-watch.mjs --ui                    # + Operation Aurum dashboard at http://localhost:8787
@@ -83,7 +83,7 @@ const CFG = {
   trade: arg('--trade', ''),                                   // '' | paper | oanda
   tradeFrom: arg('--trade-from', 'EIE PRO,SK SEQ').split(',').map(x => x.trim()),
   balance: Number(arg('--balance', 5000)),
-  spread: Number(arg('--spread', 0.35)),                      // round-trip cost per unit for the paper account
+  spread: arg('--spread', '') === '' ? null : Number(arg('--spread', '')),   // round-trip cost per unit (default: by asset, see ASSETS)
   maxTradesDay: Number(arg('--max-trades', 5)),
   maxLossDay: Number(arg('--max-losses', 2)),
   stateAlerts: flag('--state-alerts'),   // also notify every EIE state change / zone touch (noisy)
@@ -93,6 +93,21 @@ const CFG = {
 if (flag('--selftest')) { CFG.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eie-selftest-')); CFG.notify = false; }
 fs.mkdirSync(CFG.dir, { recursive: true });
 const EVENTS = path.join(CFG.dir, 'events.jsonl');
+
+// ── supported assets: gold, WTI crude, Bitcoin (anything else gets the generic profile) ──
+// step = smallest order size in units; spread = round-trip cost per unit in price (paper P&L only).
+const ASSETS = [
+  { name: 'GOLD',  re: /XAU|GOLD|^GC|^MGC/i,             step: 1,     spread: () => 0.35,       oanda: 'XAU_USD' },
+  { name: 'CRUDE', re: /WTI|USOIL|UKOIL|OIL|^CL|^MCL/i,  step: 1,     spread: () => 0.04,       oanda: 'WTICO_USD' },
+  { name: 'BTC',   re: /BTC|XBT/i,                       step: 0.001, spread: (px) => px * 0.0003, oanda: 'BTC_USD' },
+];
+const GENERIC = { name: 'OTHER', step: 1, spread: (px) => px * 0.0002, oanda: null };
+function assetOf(symbol) { const t = String(symbol || '').split(':').pop(); return ASSETS.find(a => a.re.test(t)) || GENERIC; }
+function sizeUnits(symbol, riskUsd, stopDist) {
+  const a = assetOf(symbol), dec = (String(a.step).split('.')[1] || '').length;
+  return +(Math.floor(riskUsd / stopDist / a.step + 1e-9) * a.step).toFixed(dec);
+}
+const costPerUnit = (symbol, px) => CFG.spread != null ? CFG.spread : assetOf(symbol).spread(px);
 const LEDGER = path.join(CFG.dir, 'ledger.json');
 const REPORT = path.join(CFG.dir, 'report.txt');
 
@@ -462,9 +477,9 @@ async function tvPlaceOrder({ side, units, entry, sl, tp, symbol, dry }) {
     if (!m) problems.push(`unexpected Place button text "${rb.place}"`);
     else {
       if ((m[1].toLowerCase() === 'buy' ? 1 : -1) !== side) problems.push('side mismatch');
-      if (num(m[2]) !== units) problems.push(`qty ${m[2]} ≠ ${units}`);
+      if (Math.abs(num(m[2]) - units) > 1e-9) problems.push(`qty ${m[2]} ≠ ${units}`);
       if (m[3].toUpperCase() !== ticker) problems.push(`symbol ${m[3]} ≠ ${ticker}`);
-      if (Math.abs(num(m[4]) - entry) > 0.011) problems.push(`price ${m[4]} ≠ ${entry}`);
+      if (Math.abs(num(m[4]) - entry) > Math.max(0.011, Math.abs(entry) * 2e-6)) problems.push(`price ${m[4]} ≠ ${entry}`);
     }
     if (!rb.tpOn || Math.abs(num(rb.tp) - tp) > 0.011) problems.push(`take profit ${rb.tp} ≠ ${tp}`);
     if (!rb.slOn || Math.abs(num(rb.sl) - sl) > 0.011) problems.push(`stop loss ${rb.sl} ≠ ${sl}`);
@@ -504,13 +519,13 @@ function makeBroker(mode) {
     if (!r.ok) throw new Error(`OANDA ${r.status}: ${j.errorMessage || JSON.stringify(j).slice(0, 200)}`);
     return j;
   };
-  const instr = (sym) => /XAU|GOLD/i.test(sym) ? 'XAU_USD' : /WTI|USOIL|CL1|MCL/i.test(sym) ? 'WTICO_USD' : null;
+  const instr = (sym) => assetOf(sym).oanda;
   const px = (x) => Number(x).toFixed(3);
   const rollDay = () => { const d = dayKey(); if (d !== st.day) Object.assign(st, { day: d, dayTrades: 0, dayLosses: 0 }); };
   const closeTrade = (exit, reason, pnlOverride) => {
     const p = st.pos; if (!p) return;
     const gross = (exit - p.entry) * p.side * p.units;
-    const pnl = pnlOverride != null ? pnlOverride : gross - CFG.spread * p.units;
+    const pnl = pnlOverride != null ? pnlOverride : gross - costPerUnit(p.symbol, p.entry) * p.units;
     const R = pnl / (Math.abs(p.entry - p.sl) * p.units);
     st.balance += pnl;
     const t = { ...p, closed: now(), exit: +exit.toFixed(3), pnl: +pnl.toFixed(2), R: +R.toFixed(2), reason, mode, side: p.side === 1 ? 'LONG' : 'SHORT' };
@@ -536,8 +551,8 @@ function makeBroker(mode) {
       if (st.dayTrades >= CFG.maxTradesDay) return skip(`max trades/day (${CFG.maxTradesDay}) reached`);
       if (/CONFLICT/.test((kv(snap.panels?.['SK SEQ'] || [])['Filters']) || '')) return skip('EIE × SK conflict');
       const dist = Math.abs(lvls.entry - lvls.sl);
-      const units = Math.floor(CFG.riskUsd / dist);
-      if (units < 1) return skip(`stop ${dist.toFixed(2)} too wide for $${CFG.riskUsd} risk`);
+      const units = sizeUnits(snap.symbol, CFG.riskUsd, dist);
+      if (!(units > 0)) return skip(`stop ${dist.toFixed(2)} too wide for $${CFG.riskUsd} risk (min size ${assetOf(snap.symbol).step} ${assetOf(snap.symbol).name})`);
       const o = { src, symbol: snap.symbol, side, ...lvls, units, opened: now() };
       if (mode === 'oanda') {
         const ins = instr(snap.symbol); if (!ins) return skip(`no OANDA instrument for ${snap.symbol}`);
@@ -1035,6 +1050,11 @@ async function selftest() {
   const settleOk = types.slice(before).includes('CHART_CHANGED') && !types.slice(before).includes('PLACE_LIMIT');
   console.log('settle after chart change suppresses orders:', settleOk);
   if (!settleOk) { console.log('SELFTEST FAIL (settle)'); process.exit(1); }
+  // multi-asset sizing: $25 risk → gold 3.2 stop = 7 units · WTI 0.30 stop = 83 units · BTC 450 stop = 0.055 BTC
+  const sz = [['OANDA:XAUUSD', 3.2, 7, 'GOLD'], ['TVC:USOIL', 0.30, 83, 'CRUDE'], ['BITSTAMP:BTCUSD', 450, 0.055, 'BTC'], ['COINBASE:BTCUSD', 30000, 0, 'BTC']];
+  const sizeOk = sz.every(([sym, d, u, a]) => sizeUnits(sym, 25, d) === u && assetOf(sym).name === a);
+  console.log('asset sizing (gold / crude / BTC):', sizeOk, sz.map(([sym, d]) => `${assetOf(sym).name} ${sizeUnits(sym, 25, d)}`).join(' · '));
+  if (!sizeOk) { console.log('SELFTEST FAIL (sizing)'); process.exit(1); }
   const expect = ['PLACE_LIMIT', 'MOVE_LIMIT', 'FILLED', 'TRADE_CLOSED', 'CANCEL_LIMIT', 'START', 'STATE', 'NEW_POINT', 'STATE', 'NEW_POINT', 'REPOSITION', 'ZONE_TOUCH', 'UNEXPECTED_MOVE', 'STATE', 'RESET', 'REPAINT_SUSPECT'];
   const ok = expect.every(t => types.includes(t));
   console.log('\nevents:', types.join(', '));
@@ -1042,7 +1062,7 @@ async function selftest() {
   process.exit(ok ? 0 : 1);
 }
 
-// ── one-off test order: BUY 1 unit, limit 2% below market (should not fill), Paper Trading only ──
+// ── one-off test order: BUY the asset's smallest size, limit 2% below market (should not fill), Paper Trading only ──
 async function tvTestOrder() {
   let price = Number(arg('--price', NaN)), symbol = arg('--symbol', '');
   if (!Number.isFinite(price) || !symbol) {
@@ -1051,11 +1071,11 @@ async function tvTestOrder() {
   }
   if (!Number.isFinite(price)) throw new Error('could not read the current price from the chart');
   const entry = +(price * 0.98).toFixed(2), sl = +(entry * 0.995).toFixed(2), tp = +(entry * 1.01).toFixed(2);
-  const dry = flag('--dry');
-  console.log(`Test order: BUY 1 ${symbol} LIMIT ${entry} · SL ${sl} · TP ${tp}  (2% below ${price}, should not fill)${dry ? '  [dry run]' : ''}`);
-  const r = await tvPlaceOrder({ side: 1, units: 1, entry, sl, tp, symbol, dry });
+  const dry = flag('--dry'), units = assetOf(symbol).step;
+  console.log(`Test order: BUY ${units} ${symbol} LIMIT ${entry} · SL ${sl} · TP ${tp}  (2% below ${price}, should not fill)${dry ? '  [dry run]' : ''}`);
+  const r = await tvPlaceOrder({ side: 1, units, entry, sl, tp, symbol, dry });
   if (r.placed) {
-    csvAppend({ opened: now(), closed: '', mode: 'tv-test', src: 'test', symbol, side: 'LONG', entry, sl, tp, units: 1, exit: '', pnl: '', R: '', reason: 'TEST ORDER placed in TradingView Paper' });
+    csvAppend({ opened: now(), closed: '', mode: 'tv-test', src: 'test', symbol, side: 'LONG', entry, sl, tp, units, exit: '', pnl: '', R: '', reason: 'TEST ORDER placed in TradingView Paper' });
     console.log(r.verified
       ? `PLACED ✓  "${r.summary}" · Orders tab ${r.ordersBefore} → ${r.ordersAfter} (a bracket shows as 3 rows). Cancel it in TradingView (Orders tab → ✕).`
       : `CLICKED Place for "${r.summary}" but the Orders count did not change within 8 s (${r.ordersBefore} → ${r.ordersAfter}). It may still have been placed — check the Orders tab before running again.`);
@@ -1067,10 +1087,11 @@ else if (flag('--tv-test')) tvTestOrder().then(() => process.exit(0)).catch((e) 
 else main(CFG.demo ? makeDemoReader() : await makeRealReader());
 EOF_WATCH
 cat > "$HOME/eie-watch/CLAUDE.md" <<'EOF_MD'
-# EIE desk — instructions for Claude Code on this Mac
+# EIE desk — instructions for AI agents on this computer
 
-You are assisting a prop-firm trader (gold XAUUSD and WTI crude only) who trades the
-**Elliott Impulse Engine [WillyAlgoTrader]** (EIE) indicator on a **1-minute** TradingView Desktop chart.
+You are assisting a prop-firm trader (gold XAUUSD, WTI crude and Bitcoin BTCUSD) who trades the
+EIE PRO and SK SEQ indicators (EIE PRO is a fork of **Elliott Impulse Engine [WillyAlgoTrader]**)
+on 1m–15m TradingView Desktop charts.
 Think like a quant and an Elliott-wave practitioner: evidence over narrative.
 
 ## Tools
@@ -1082,6 +1103,10 @@ Think like a quant and an Elliott-wave practitioner: evidence over narrative.
   Read those files before answering questions about signals or repainting.
 - Do not change the chart's symbol or timeframe while the watcher runs unless the user asks
   (it would interrupt monitoring). Never place, modify or cancel orders.
+
+## Setup
+For installation, health checks and troubleshooting, follow the repo's `.claude/skills/operation-aurum/SKILL.md`,
+or run `node ~/eie-watch/doctor.mjs`.
 
 ## Facts about EIE (audited from its source, v0.9.0-dev)
 - No lookahead / no request.security; pivots used only on confirmed bars; CHoCH and (Close mode)
@@ -1095,8 +1120,10 @@ Think like a quant and an Elliott-wave practitioner: evidence over narrative.
 ## Trading rules to apply in every plan
 - Risk 0.5% per trade ($25 on a 5K account), strict 1:2 R:R, stop just beyond point 0
   (the INVALID level in wave 2), limit entry inside the W2 OTE box (default 0.618 of leg 0→1).
-- Max 3–5 trades/day, stop after 2 losses; one open trade at a time (gold and oil correlate).
+- Max 3–5 trades/day, stop after 2 losses; one open trade at a time across all assets.
 - No new entries 30 min before high-impact news (CPI, NFP, FOMC; crude: EIA Wed 10:30 ET, OPEC).
+  Bitcoin trades 24/7: weekend liquidity is thin, so treat weekend setups with extra caution.
+- Costs per asset (round trip): gold ~0.35, WTI ~0.04, BTC ~0.03% of price. The indicators use these automatically.
 - On 1m, cost (spread + slippage) is ~10–20% of R: reject setups whose stop is < 5× the spread.
 - Prefer setups aligned with the 15m/1H direction.
 
@@ -1389,7 +1416,7 @@ function Operation({ panels, last }) {
         <div><label for="units">UNITS PER LOT</label><input id="units" type="number" min="1" step="1" value=${units} onInput=${ev => setUnits(+ev.target.value || 0)} /></div>
       </div>
       <div class="out">
-        ${side === 'idle' ? html`Sizing appears when a limit is placed. Gold CFD: 100 units/lot · WTI: 1000.`
+        ${side === 'idle' ? html`Sizing appears when a limit is placed. Gold CFD: 100 units/lot · WTI: 1000 · BTC: sized in 0.001 BTC.`
           : html`Size <b>${fmt(dist ? risk / dist : null, 2)} units</b> (${fmt(lots, 3)} lots) · R:R ${fmt(rr, 2)} · stop ${fmt(dist)} · price ${toEntry == null ? '—' : (toEntry >= 0 ? '+' : '') + fmt(toEntry)} from entry
              ${dist && risk / dist < 1 ? html`<div style=${{ color: C.red, marginTop: '6px' }}>Stop too wide for $${risk} risk (under 1 unit): the bot skips this. Use a lower timeframe or raise risk.</div>` : null}`}
       </div>
@@ -1813,17 +1840,124 @@ parentPort.on('message', (job) => {
 EOF_MCW
 cat > "$HOME/eie-watch/start.sh" <<'EOF_START'
 #!/bin/bash
-# Starts TradingView with the debug port (if needed) and runs the EIE watcher; keeps the Mac awake.
-if [[ " $* " != *" --demo "* ]] && ! curl -s --max-time 2 http://127.0.0.1:9222/json/version >/dev/null; then
-  osascript -e 'quit app "TradingView"' >/dev/null 2>&1 || true; sleep 3
-  open -a TradingView --args --remote-debugging-port=9222
-  for i in $(seq 1 45); do curl -s --max-time 2 http://127.0.0.1:9222/json/version >/dev/null && break; sleep 2; done
+# Starts TradingView Desktop with the local debug port (if needed) and runs the watcher, keeping the computer awake.
+# Installed to ~/eie-watch/start.sh by scripts/install.sh. All arguments go to eie-watch.mjs.
+W="$HOME/eie-watch"
+up() { curl -s --max-time 2 http://127.0.0.1:9222/json/version >/dev/null; }
+if [[ " $* " != *" --demo "* && " $* " != *" --selftest "* ]] && ! up; then
+  case "$(uname)" in
+    Darwin)
+      osascript -e 'quit app "TradingView"' >/dev/null 2>&1 || true; sleep 3
+      open -a TradingView --args --remote-debugging-port=9222 ;;
+    Linux)
+      pkill -f -i tradingview >/dev/null 2>&1 || true; sleep 2
+      if command -v tradingview >/dev/null 2>&1; then nohup tradingview --remote-debugging-port=9222 >/dev/null 2>&1 &
+      elif [ -x /snap/bin/tradingview ]; then nohup /snap/bin/tradingview --remote-debugging-port=9222 >/dev/null 2>&1 &
+      else echo "TradingView Desktop not found. Start it yourself with --remote-debugging-port=9222"; fi ;;
+  esac
+  for i in $(seq 1 45); do up && break; sleep 2; done
+  up || echo "WARNING: TradingView debug port 9222 is not up. Run: node $W/doctor.mjs"
   sleep 8
 fi
-case " $* " in *" --ui "*|*" --demo "*) (sleep 3; open "http://localhost:8787") & ;; esac
-exec caffeinate -i node "$HOME/eie-watch/eie-watch.mjs" "$@"
+PORT=8787; prev=""; for a in "$@"; do [ "$prev" = "--port" ] && PORT="$a"; prev="$a"; done
+case " $* " in *" --ui "*|*" --demo "*)
+  (sleep 3; if command -v open >/dev/null 2>&1; then open "http://localhost:$PORT"; elif command -v xdg-open >/dev/null 2>&1; then xdg-open "http://localhost:$PORT"; fi) >/dev/null 2>&1 & ;;
+esac
+if command -v caffeinate >/dev/null 2>&1; then exec caffeinate -i node "$W/eie-watch.mjs" "$@"
+elif command -v systemd-inhibit >/dev/null 2>&1; then exec systemd-inhibit --what=idle:sleep --why="Operation Aurum watcher" node "$W/eie-watch.mjs" "$@"
+else exec node "$W/eie-watch.mjs" "$@"; fi
 EOF_START
 chmod +x "$HOME/eie-watch/start.sh"
+cat > "$HOME/eie-watch/doctor.mjs" <<'EOF_DOC'
+#!/usr/bin/env node
+// Operation Aurum health check. Read-only: never changes the chart, settings or orders.
+//   node ~/eie-watch/doctor.mjs           human-readable
+//   node ~/eie-watch/doctor.mjs --json    machine-readable (for AI agents)
+//   node ~/eie-watch/doctor.mjs --ntfy TOPIC   also send a test push to your phone
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const argv = process.argv.slice(2);
+const arg = (k, d) => { const i = argv.indexOf(k); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
+const W = path.join(os.homedir(), 'eie-watch');
+const BRIDGE = path.join(os.homedir(), 'tradingview-mcp');
+const WANT = { 'Elliott Impulse': { short: 'EIE PRO', ver: 10 }, 'SK Sequence': { short: 'SK SEQ', ver: 16 } };
+const ASSET = (t) => /XAU|GOLD|^GC|^MGC/i.test(t) ? 'GOLD' : /WTI|USOIL|UKOIL|OIL|^CL|^MCL/i.test(t) ? 'CRUDE' : /BTC|XBT/i.test(t) ? 'BTC' : 'OTHER';
+const out = [];
+const add = (status, check, detail, fix) => out.push({ status, check, detail, ...(fix ? { fix } : {}) });
+const get = async (u, ms = 2500) => { const r = await fetch(u, { signal: AbortSignal.timeout(ms) }); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); };
+
+// 1. runtime + files
+const major = Number(process.versions.node.split('.')[0]);
+major >= 18 ? add('PASS', 'Node.js', process.version) : add('FAIL', 'Node.js', process.version, 'Install Node.js 18+ from https://nodejs.org');
+const files = ['eie-watch.mjs', 'mc-worker.mjs', 'ui.html', 'start.sh'];
+const missing = files.filter(f => !fs.existsSync(path.join(W, f)));
+missing.length ? add('FAIL', 'Watcher files', `missing in ${W}: ${missing.join(', ')}`, 'Run: bash scripts/install.sh (from the repo)')
+  : add('PASS', 'Watcher files', W);
+const libs = ['react', 'react-dom', 'htm', 'lightweight-charts'].filter(l => !fs.existsSync(path.join(W, 'node_modules', l)));
+libs.length ? add('FAIL', 'Dashboard libraries', `missing: ${libs.join(', ')}`, `Run: cd ${W} && npm install`) : add('PASS', 'Dashboard libraries', 'react · react-dom · htm · lightweight-charts');
+const bridgeOk = fs.existsSync(path.join(BRIDGE, 'src', 'server.js')) && fs.existsSync(path.join(BRIDGE, 'node_modules'));
+bridgeOk ? add('PASS', 'TradingView bridge', BRIDGE) : add('FAIL', 'TradingView bridge', `not installed at ${BRIDGE}`, 'Run: bash scripts/install.sh (without --demo-only)');
+
+// 2. TradingView Desktop debug port
+let chart = null;
+try {
+  const v = await get('http://127.0.0.1:9222/json/version');
+  add('PASS', 'TradingView debug port 9222', v.Browser || 'up');
+  const list = await get('http://127.0.0.1:9222/json/list');
+  chart = list.find(t => t.type === 'page' && /tradingview\.com\/chart/.test(t.url || ''));
+  chart ? add('PASS', 'Chart page', chart.title || chart.url) : add('FAIL', 'Chart page', 'no chart open', 'Open a chart tab in TradingView Desktop');
+} catch (e) {
+  add('FAIL', 'TradingView debug port 9222', String(e.message || e), process.platform === 'darwin'
+    ? 'Run: ~/eie-watch/start.sh (relaunches TradingView with the port), or: open -a TradingView --args --remote-debugging-port=9222'
+    : 'Start TradingView Desktop with --remote-debugging-port=9222 (or run ~/eie-watch/start.sh)');
+}
+
+// 3. indicators + symbol on the chart (read-only evaluate)
+if (chart && bridgeOk) {
+  let client;
+  try {
+    const CDP = createRequire(path.join(BRIDGE, 'package.json'))('chrome-remote-interface');
+    client = await CDP({ host: '127.0.0.1', port: 9222, target: chart.id });
+    const r = await client.Runtime.evaluate({ returnByValue: true, expression: `(function(){ var a = window.TradingViewApi._activeChartWidgetWV.value();
+      return { symbol: a.symbol(), tf: a.resolution(), studies: (a.getAllStudies() || []).map(function(s){ return s.name; }) }; })()` });
+    const v = r.result && r.result.value;
+    if (!v) throw new Error(r.exceptionDetails ? r.exceptionDetails.text : 'no result');
+    const tick = String(v.symbol).split(':').pop();
+    const asset = ASSET(tick);
+    add(asset === 'OTHER' ? 'WARN' : 'PASS', 'Chart symbol', `${v.symbol} · ${v.tf}m · asset ${asset}`,
+      asset === 'OTHER' ? 'Supported: gold (OANDA:XAUUSD), WTI crude (OANDA:WTICOUSD), Bitcoin (BITSTAMP:BTCUSD); others use generic costs' : undefined);
+    for (const [key, w] of Object.entries(WANT)) {
+      const s = v.studies.find(n => n.includes(key));
+      if (!s) { add('FAIL', w.short + ' indicator', 'not on the chart', `Pine Editor → paste ~/eie-watch/pine/${w.short === 'EIE PRO' ? 'eie_pro_v10' : 'sk_engine_v16'}.pine → Save → Add to chart`); continue; }
+      const ver = Number((s.match(/ v(\d+)/) || [])[1]);
+      ver >= w.ver ? add('PASS', w.short + ' indicator', s) : add('WARN', w.short + ' indicator', `${s} (latest is v${w.ver})`, 'Replace the script with the version in ~/eie-watch/pine/ for gold/crude/BTC auto costs');
+    }
+  } catch (e) { add('WARN', 'Indicator check', String(e.message || e), 'Make sure the chart has finished loading, then re-run'); }
+  finally { try { await client?.close(); } catch {} }
+}
+
+// 4. optional phone push test
+const topic = arg('--ntfy', '');
+if (topic) {
+  try {
+    const r = await fetch('https://ntfy.sh/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(5000),
+      body: JSON.stringify({ topic, title: 'Operation Aurum', message: 'doctor: phone alerts work' }) });
+    r.ok ? add('PASS', 'Phone push (ntfy)', `sent to topic ${topic}`) : add('FAIL', 'Phone push (ntfy)', 'HTTP ' + r.status);
+  } catch (e) { add('FAIL', 'Phone push (ntfy)', String(e.message || e), 'Check the internet connection'); }
+}
+
+const fails = out.filter(o => o.status === 'FAIL').length;
+if (argv.includes('--json')) console.log(JSON.stringify({ ok: fails === 0, checks: out }, null, 2));
+else {
+  const c = { PASS: '\x1b[32m', WARN: '\x1b[33m', FAIL: '\x1b[31m' };
+  for (const o of out) console.log(`${c[o.status]}${o.status.padEnd(4)}\x1b[0m  ${o.check.padEnd(28)} ${o.detail}${o.fix ? `\n      → ${o.fix}` : ''}`);
+  console.log(fails ? `\n${fails} problem(s) to fix.` : '\nAll required checks passed.');
+}
+process.exit(fails ? 1 : 0);
+EOF_DOC
 node "$HOME/eie-watch/eie-watch.mjs" --selftest
 
 say "4/6 Connecting the bridge to Claude Code"
@@ -1846,7 +1980,8 @@ else echo "Port 9222 did not come up. Open TradingView manually with:"; echo "  
 say "6/6 Done"
 cat <<'MSG'
 Next:
-  1. In TradingView: a gold chart (1m-15m) with your two indicators, EIE PRO and SK SEQ
+  1. In TradingView: a gold, WTI crude or Bitcoin chart (1m-15m) with your two indicators, EIE PRO and SK SEQ
+     (scripts: pine/eie_pro_v10.pine and pine/sk_engine_v16.pine in the GitHub repo; health check: node ~/eie-watch/doctor.mjs)
      (SK setting "EIE direction source" = EIE PRO: EIE direction).
   2. Start watching (Mac notifications when EIE PRO / SK SEQ place, move, fill or cancel a limit):
        ~/eie-watch/start.sh
@@ -1856,13 +1991,13 @@ Next:
      Auto-trade TradingView Paper Trading (order dialog open: right-click chart → Trade → Create limit order):
        ~/eie-watch/start.sh --ui --trade tv-dry   (fills + verifies the dialog, does NOT click Place)
        ~/eie-watch/start.sh --ui --trade tv       (places the order; refuses unless the account is Paper Trading)
-     One test order (BUY 1 unit, 2% below market, Paper only) to see it work:  node ~/eie-watch/eie-watch.mjs --tv-test
+     One test order (smallest size, 2% below market, Paper only) to see it work:  node ~/eie-watch/eie-watch.mjs --tv-test
      Or a built-in simulated account:  ~/eie-watch/start.sh --ui --trade paper
      Every bot order is logged to ~/eie-watch/trades.csv
      Phone too (free): install the "ntfy" app, subscribe to a long random topic, then:
        ~/eie-watch/start.sh --ntfy YOUR-LONG-RANDOM-TOPIC
-     Both gold and crude on one chart (switches symbol every 20 s; don't trade on that chart):
-       ~/eie-watch/start.sh --rotate "OANDA:XAUUSD,TVC:USOIL" --dwell 20
+     Gold, crude and Bitcoin on one chart (switches symbol every 20 s; don't trade on that chart):
+       ~/eie-watch/start.sh --rotate "OANDA:XAUUSD,OANDA:WTICOUSD,BITSTAMP:BTCUSD" --dwell 20
   3. Ask Claude about signals:   cd ~/eie-watch && claude
   4. Repaint audit summary:       cat ~/eie-watch/report.txt   (updated every 10 min and on Ctrl+C)
 Port 9222 listens only on this Mac, but any program on this Mac can control TradingView while it is open.

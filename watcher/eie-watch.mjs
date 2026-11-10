@@ -6,7 +6,7 @@
  *
  * Usage:
  *   node eie-watch.mjs                         # watch the active chart
- *   node eie-watch.mjs --rotate "OANDA:XAUUSD,TVC:USOIL" --dwell 20
+ *   node eie-watch.mjs --rotate "OANDA:XAUUSD,OANDA:WTICOUSD,BITSTAMP:BTCUSD" --dwell 20   # gold · WTI crude · Bitcoin
  *   node eie-watch.mjs --interval 2 --risk 25 --buffer 0.30 --no-notify
  *   node eie-watch.mjs --ntfy my-secret-topic-123 # also push to your phone (free ntfy app)
  *   node eie-watch.mjs --ui                    # + Operation Aurum dashboard at http://localhost:8787
@@ -58,7 +58,7 @@ const CFG = {
   trade: arg('--trade', ''),                                   // '' | paper | oanda
   tradeFrom: arg('--trade-from', 'EIE PRO,SK SEQ').split(',').map(x => x.trim()),
   balance: Number(arg('--balance', 5000)),
-  spread: Number(arg('--spread', 0.35)),                      // round-trip cost per unit for the paper account
+  spread: arg('--spread', '') === '' ? null : Number(arg('--spread', '')),   // round-trip cost per unit (default: by asset, see ASSETS)
   maxTradesDay: Number(arg('--max-trades', 5)),
   maxLossDay: Number(arg('--max-losses', 2)),
   stateAlerts: flag('--state-alerts'),   // also notify every EIE state change / zone touch (noisy)
@@ -68,6 +68,21 @@ const CFG = {
 if (flag('--selftest')) { CFG.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eie-selftest-')); CFG.notify = false; }
 fs.mkdirSync(CFG.dir, { recursive: true });
 const EVENTS = path.join(CFG.dir, 'events.jsonl');
+
+// ── supported assets: gold, WTI crude, Bitcoin (anything else gets the generic profile) ──
+// step = smallest order size in units; spread = round-trip cost per unit in price (paper P&L only).
+const ASSETS = [
+  { name: 'GOLD',  re: /XAU|GOLD|^GC|^MGC/i,             step: 1,     spread: () => 0.35,       oanda: 'XAU_USD' },
+  { name: 'CRUDE', re: /WTI|USOIL|UKOIL|OIL|^CL|^MCL/i,  step: 1,     spread: () => 0.04,       oanda: 'WTICO_USD' },
+  { name: 'BTC',   re: /BTC|XBT/i,                       step: 0.001, spread: (px) => px * 0.0003, oanda: 'BTC_USD' },
+];
+const GENERIC = { name: 'OTHER', step: 1, spread: (px) => px * 0.0002, oanda: null };
+function assetOf(symbol) { const t = String(symbol || '').split(':').pop(); return ASSETS.find(a => a.re.test(t)) || GENERIC; }
+function sizeUnits(symbol, riskUsd, stopDist) {
+  const a = assetOf(symbol), dec = (String(a.step).split('.')[1] || '').length;
+  return +(Math.floor(riskUsd / stopDist / a.step + 1e-9) * a.step).toFixed(dec);
+}
+const costPerUnit = (symbol, px) => CFG.spread != null ? CFG.spread : assetOf(symbol).spread(px);
 const LEDGER = path.join(CFG.dir, 'ledger.json');
 const REPORT = path.join(CFG.dir, 'report.txt');
 
@@ -437,9 +452,9 @@ async function tvPlaceOrder({ side, units, entry, sl, tp, symbol, dry }) {
     if (!m) problems.push(`unexpected Place button text "${rb.place}"`);
     else {
       if ((m[1].toLowerCase() === 'buy' ? 1 : -1) !== side) problems.push('side mismatch');
-      if (num(m[2]) !== units) problems.push(`qty ${m[2]} ≠ ${units}`);
+      if (Math.abs(num(m[2]) - units) > 1e-9) problems.push(`qty ${m[2]} ≠ ${units}`);
       if (m[3].toUpperCase() !== ticker) problems.push(`symbol ${m[3]} ≠ ${ticker}`);
-      if (Math.abs(num(m[4]) - entry) > 0.011) problems.push(`price ${m[4]} ≠ ${entry}`);
+      if (Math.abs(num(m[4]) - entry) > Math.max(0.011, Math.abs(entry) * 2e-6)) problems.push(`price ${m[4]} ≠ ${entry}`);
     }
     if (!rb.tpOn || Math.abs(num(rb.tp) - tp) > 0.011) problems.push(`take profit ${rb.tp} ≠ ${tp}`);
     if (!rb.slOn || Math.abs(num(rb.sl) - sl) > 0.011) problems.push(`stop loss ${rb.sl} ≠ ${sl}`);
@@ -479,13 +494,13 @@ function makeBroker(mode) {
     if (!r.ok) throw new Error(`OANDA ${r.status}: ${j.errorMessage || JSON.stringify(j).slice(0, 200)}`);
     return j;
   };
-  const instr = (sym) => /XAU|GOLD/i.test(sym) ? 'XAU_USD' : /WTI|USOIL|CL1|MCL/i.test(sym) ? 'WTICO_USD' : null;
+  const instr = (sym) => assetOf(sym).oanda;
   const px = (x) => Number(x).toFixed(3);
   const rollDay = () => { const d = dayKey(); if (d !== st.day) Object.assign(st, { day: d, dayTrades: 0, dayLosses: 0 }); };
   const closeTrade = (exit, reason, pnlOverride) => {
     const p = st.pos; if (!p) return;
     const gross = (exit - p.entry) * p.side * p.units;
-    const pnl = pnlOverride != null ? pnlOverride : gross - CFG.spread * p.units;
+    const pnl = pnlOverride != null ? pnlOverride : gross - costPerUnit(p.symbol, p.entry) * p.units;
     const R = pnl / (Math.abs(p.entry - p.sl) * p.units);
     st.balance += pnl;
     const t = { ...p, closed: now(), exit: +exit.toFixed(3), pnl: +pnl.toFixed(2), R: +R.toFixed(2), reason, mode, side: p.side === 1 ? 'LONG' : 'SHORT' };
@@ -511,8 +526,8 @@ function makeBroker(mode) {
       if (st.dayTrades >= CFG.maxTradesDay) return skip(`max trades/day (${CFG.maxTradesDay}) reached`);
       if (/CONFLICT/.test((kv(snap.panels?.['SK SEQ'] || [])['Filters']) || '')) return skip('EIE × SK conflict');
       const dist = Math.abs(lvls.entry - lvls.sl);
-      const units = Math.floor(CFG.riskUsd / dist);
-      if (units < 1) return skip(`stop ${dist.toFixed(2)} too wide for $${CFG.riskUsd} risk`);
+      const units = sizeUnits(snap.symbol, CFG.riskUsd, dist);
+      if (!(units > 0)) return skip(`stop ${dist.toFixed(2)} too wide for $${CFG.riskUsd} risk (min size ${assetOf(snap.symbol).step} ${assetOf(snap.symbol).name})`);
       const o = { src, symbol: snap.symbol, side, ...lvls, units, opened: now() };
       if (mode === 'oanda') {
         const ins = instr(snap.symbol); if (!ins) return skip(`no OANDA instrument for ${snap.symbol}`);
@@ -1010,6 +1025,11 @@ async function selftest() {
   const settleOk = types.slice(before).includes('CHART_CHANGED') && !types.slice(before).includes('PLACE_LIMIT');
   console.log('settle after chart change suppresses orders:', settleOk);
   if (!settleOk) { console.log('SELFTEST FAIL (settle)'); process.exit(1); }
+  // multi-asset sizing: $25 risk → gold 3.2 stop = 7 units · WTI 0.30 stop = 83 units · BTC 450 stop = 0.055 BTC
+  const sz = [['OANDA:XAUUSD', 3.2, 7, 'GOLD'], ['TVC:USOIL', 0.30, 83, 'CRUDE'], ['BITSTAMP:BTCUSD', 450, 0.055, 'BTC'], ['COINBASE:BTCUSD', 30000, 0, 'BTC']];
+  const sizeOk = sz.every(([sym, d, u, a]) => sizeUnits(sym, 25, d) === u && assetOf(sym).name === a);
+  console.log('asset sizing (gold / crude / BTC):', sizeOk, sz.map(([sym, d]) => `${assetOf(sym).name} ${sizeUnits(sym, 25, d)}`).join(' · '));
+  if (!sizeOk) { console.log('SELFTEST FAIL (sizing)'); process.exit(1); }
   const expect = ['PLACE_LIMIT', 'MOVE_LIMIT', 'FILLED', 'TRADE_CLOSED', 'CANCEL_LIMIT', 'START', 'STATE', 'NEW_POINT', 'STATE', 'NEW_POINT', 'REPOSITION', 'ZONE_TOUCH', 'UNEXPECTED_MOVE', 'STATE', 'RESET', 'REPAINT_SUSPECT'];
   const ok = expect.every(t => types.includes(t));
   console.log('\nevents:', types.join(', '));
@@ -1017,7 +1037,7 @@ async function selftest() {
   process.exit(ok ? 0 : 1);
 }
 
-// ── one-off test order: BUY 1 unit, limit 2% below market (should not fill), Paper Trading only ──
+// ── one-off test order: BUY the asset's smallest size, limit 2% below market (should not fill), Paper Trading only ──
 async function tvTestOrder() {
   let price = Number(arg('--price', NaN)), symbol = arg('--symbol', '');
   if (!Number.isFinite(price) || !symbol) {
@@ -1026,11 +1046,11 @@ async function tvTestOrder() {
   }
   if (!Number.isFinite(price)) throw new Error('could not read the current price from the chart');
   const entry = +(price * 0.98).toFixed(2), sl = +(entry * 0.995).toFixed(2), tp = +(entry * 1.01).toFixed(2);
-  const dry = flag('--dry');
-  console.log(`Test order: BUY 1 ${symbol} LIMIT ${entry} · SL ${sl} · TP ${tp}  (2% below ${price}, should not fill)${dry ? '  [dry run]' : ''}`);
-  const r = await tvPlaceOrder({ side: 1, units: 1, entry, sl, tp, symbol, dry });
+  const dry = flag('--dry'), units = assetOf(symbol).step;
+  console.log(`Test order: BUY ${units} ${symbol} LIMIT ${entry} · SL ${sl} · TP ${tp}  (2% below ${price}, should not fill)${dry ? '  [dry run]' : ''}`);
+  const r = await tvPlaceOrder({ side: 1, units, entry, sl, tp, symbol, dry });
   if (r.placed) {
-    csvAppend({ opened: now(), closed: '', mode: 'tv-test', src: 'test', symbol, side: 'LONG', entry, sl, tp, units: 1, exit: '', pnl: '', R: '', reason: 'TEST ORDER placed in TradingView Paper' });
+    csvAppend({ opened: now(), closed: '', mode: 'tv-test', src: 'test', symbol, side: 'LONG', entry, sl, tp, units, exit: '', pnl: '', R: '', reason: 'TEST ORDER placed in TradingView Paper' });
     console.log(r.verified
       ? `PLACED ✓  "${r.summary}" · Orders tab ${r.ordersBefore} → ${r.ordersAfter} (a bracket shows as 3 rows). Cancel it in TradingView (Orders tab → ✕).`
       : `CLICKED Place for "${r.summary}" but the Orders count did not change within 8 s (${r.ordersBefore} → ${r.ordersAfter}). It may still have been placed — check the Orders tab before running again.`);

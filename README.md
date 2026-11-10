@@ -1,34 +1,59 @@
 # Operation Aurum
 
-Toolkit for trading XAUUSD and WTI crude with two TradingView indicators, plus a watcher on the Mac
-that turns indicator signals into alerts, TradingView **Paper Trading** orders and a live dashboard.
+Toolkit for trading **gold (XAUUSD), WTI crude oil and Bitcoin (BTCUSD)** with two TradingView indicators. A watcher
+on your computer turns indicator signals into desktop and phone alerts and TradingView **Paper Trading** orders, and
+runs a live Monte Carlo dashboard.
 
-> Paper trading only. Nothing here is financial advice.
+> Paper trading only. Nothing here is financial advice. Back-test statistics do not predict future results.
+
+## Quick start
+
+### With an AI agent (recommended)
+Open the repo in any AI coding agent (Claude Code, Codex, Cursor, Gemini CLI, ...) and say:
+
+> Set up Operation Aurum for me.
+
+The agent follows [`.claude/skills/operation-aurum/SKILL.md`](.claude/skills/operation-aurum/SKILL.md). It installs
+dependencies, runs the health check, walks you through adding the indicators, and starts the watcher.
+`AGENTS.md` points agents that don't use Claude skills to the same runbook.
+
+### By hand (macOS / Linux)
+```bash
+git clone https://github.com/nikhiljha97/operation-aurum && cd operation-aurum
+bash scripts/install.sh
+node ~/eie-watch/doctor.mjs
+~/eie-watch/start.sh --demo
+```
+Then paste `pine/eie_pro_v10.pine` and `pine/sk_engine_v16.pine` into TradingView's Pine Editor (Save → Add to chart)
+and run `~/eie-watch/start.sh --ui`.
+
+## Supported assets
+| Asset | Suggested symbol | Auto cost (round trip) | Min size | Extra news blackout |
+|---|---|---|---|---|
+| Gold | `OANDA:XAUUSD` | 0.35 | 1 unit | — |
+| WTI crude | `OANDA:WTICOUSD` | 0.04 | 1 unit | EIA, Wed 10:30 ET |
+| Bitcoin | `BITSTAMP:BTCUSD` | 0.03% of price | 0.001 BTC | — (trades 24/7) |
+
+CPI and NFP blackouts apply to all three. Add FOMC and other events in the indicators' "Extra events" input.
+Other symbols work with generic costs (0.02% of price).
 
 ## Layout
 | Path | What it is |
 |---|---|
-| `pine/eie_pro_v9.pine` | **EIE PRO**: Elliott impulse engine (fork of Elliott Impulse Engine by WillyAlgoTrader) with Auto-ML, macro, session filters and incremental Monte Carlo |
-| `pine/sk_engine_v15.pine` | **SK SEQ**: SK System (0/A/B/C, WCL, counter-trend) with Auto-ML, macro, news blackout, Monte Carlo, Super Signal and built-in SuperTrend AI (lite) |
-| `pine/archive/` | Earlier versions |
-| `watcher/eie-watch.mjs` | Reads TradingView Desktop over CDP (port 9222): signals, repaint audit, settings sync, paper orders, phone pushes (ntfy), dashboard server |
-| `watcher/mc-worker.mjs` | Monte Carlo worker thread (Bayesian win rate, prop-firm rules) |
-| `watcher/ui.html` | Operation Aurum dashboard (React + lightweight-charts): War Room, sync strip, telemetry |
-| `watcher/probe-trading.mjs` | Read-only probe of TradingView's order dialog |
-| `eie_setup.sh` | One-shot macOS installer (contains all watcher files) |
-| `research/` | Prop-firm, losing-streak, Auto-ML and SuperTrend simulations; Pine compile checker; mock order dialogs |
+| `pine/eie_pro_v10.pine` | **EIE PRO**: Elliott impulse engine (fork of Elliott Impulse Engine by WillyAlgoTrader) with Auto-ML, macro, session filters, Monte Carlo |
+| `pine/sk_engine_v16.pine` | **SK SEQ**: SK System (0/A/B/C, WCL, counter-trend) with Auto-ML, macro, news blackout, Monte Carlo, Super Signal, SuperTrend AI (lite) |
+| `watcher/` | Node.js watcher (`eie-watch.mjs`), Monte Carlo worker, Operation Aurum dashboard |
+| `scripts/install.sh` · `start.sh` · `doctor.mjs` | Installer, launcher, health check |
+| `eie_setup.sh` | Single-file macOS installer (rebuilt with `scripts/pack-standalone.py`) |
+| `.claude/skills/operation-aurum/` | Agent runbook (setup, operation, troubleshooting) |
+| `research/` | Prop-firm, losing-streak, Auto-ML and SuperTrend simulations; Pine compile checker |
 
-## Install (macOS)
-```bash
-bash eie_setup.sh
-~/eie-watch/start.sh --ui --trade tv --ntfy YOUR-LONG-RANDOM-TOPIC
-```
-Preview without TradingView: `~/eie-watch/start.sh --demo`
-
-## Free TradingView plan limits
-At most 2 indicators, no alerts, 0.5 s script time. That is why both Pine scripts bundle everything,
-and why the heavy Monte Carlo runs in the watcher.
+## Phone alerts
+Install the free **ntfy** app and subscribe to a long random topic, then run
+`~/eie-watch/start.sh --ui --ntfy YOUR-TOPIC`. To see the dashboard on your phone, use Tailscale:
+`tailscale serve --bg 8787`.
 
 ## Data flow
-TradingView chart → watcher (reads panels and drawings about every second) → dashboard / ntfy / paper orders.
-Nothing is written back into the indicators.
+TradingView chart → watcher (reads panels and drawings about every second) → dashboard, alerts, Paper orders.
+Nothing is written back into the indicators. Free TradingView plan limits (2 indicators, no alerts, 0.5 s script time)
+are why both Pine scripts bundle everything and why the heavy Monte Carlo runs in the watcher.

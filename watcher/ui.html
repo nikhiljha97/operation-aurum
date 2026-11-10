@@ -283,7 +283,7 @@ function Operation({ panels, last }) {
         <div><label for="units">UNITS PER LOT</label><input id="units" type="number" min="1" step="1" value=${units} onInput=${ev => setUnits(+ev.target.value || 0)} /></div>
       </div>
       <div class="out">
-        ${side === 'idle' ? html`Sizing appears when a limit is placed. Gold CFD: 100 units/lot · WTI: 1000.`
+        ${side === 'idle' ? html`Sizing appears when a limit is placed. Gold CFD: 100 units/lot · WTI: 1000 · BTC: sized in 0.001 BTC.`
           : html`Size <b>${fmt(dist ? risk / dist : null, 2)} units</b> (${fmt(lots, 3)} lots) · R:R ${fmt(rr, 2)} · stop ${fmt(dist)} · price ${toEntry == null ? '—' : (toEntry >= 0 ? '+' : '') + fmt(toEntry)} from entry
              ${dist && risk / dist < 1 ? html`<div style=${{ color: C.red, marginTop: '6px' }}>Stop too wide for $${risk} risk (under 1 unit): the bot skips this. Use a lower timeframe or raise risk.</div>` : null}`}
       </div>
