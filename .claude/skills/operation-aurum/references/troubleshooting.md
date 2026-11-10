@@ -6,7 +6,7 @@
 | `Chart page` FAIL | TradingView is open on a non-chart page | Open a chart tab |
 | Indicator FAIL "not on the chart" | Script not added, or renamed | Paste from `~/eie-watch/pine/`, Save, Add to chart. The title must still contain "Elliott Impulse" / "SK Sequence" |
 | Pine error "2 declarations" / "already declared" | Pasted on top of the template | Select all, delete, then paste |
-| Pine runtime error "takes too long … 0.5 s" (free plan) | Too much history / heavy options | In SK SEQ untick the SuperTrend vote or use a higher timeframe; reload the chart |
+| Pine runtime error "takes too long … 0.5 s" (free plan) | One bar took too long (RE10110) | Use EIE PRO v12 / SK SEQ v18 (lighter). Still failing: see which indicator shows the red "!", then in SK SEQ lower "Run on the last N bars" (SuperTrend group) to 800, or set "Paths simulated per closed bar" to 5 in that indicator |
 | SK SEQ appears in a separate pane | Was saved as non-overlay earlier | Pane menu → Move to → Main pane, or remove and re-add |
 | Watcher: `NO_INDICATOR` | Indicator filter mismatch | `--study "Elliott Impulse" --sk "SK Sequence"` (defaults) |
 | Watcher: `stop … too wide for $25 risk` | Stop distance × min size > risk | Expected on BTC with wide stops; raise `--risk` only if the user wants more risk per trade |

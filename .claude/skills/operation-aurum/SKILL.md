@@ -55,7 +55,7 @@ problems are in [references/troubleshooting.md](references/troubleshooting.md).
 
 ## Step 4: indicators (the user does this in TradingView)
 Free TradingView plan = max 2 indicators, so both scripts bundle everything. For each file
-`~/eie-watch/pine/eie_pro_v11.pine` and `~/eie-watch/pine/sk_engine_v17.pine`:
+`~/eie-watch/pine/eie_pro_v12.pine` and `~/eie-watch/pine/sk_engine_v18.pine`:
 1. TradingView → **Pine Editor** (bottom panel) → **⋯/Open → New indicator**.
 2. Select all (Cmd/Ctrl+A), delete, paste the whole file. Don't paste on top of the template.
 3. **Save** (name it), then **Add to chart**.
