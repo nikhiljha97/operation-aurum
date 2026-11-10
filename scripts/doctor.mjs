@@ -12,7 +12,7 @@ const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf(k); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const W = path.join(os.homedir(), 'eie-watch');
 const BRIDGE = path.join(os.homedir(), 'tradingview-mcp');
-const WANT = { 'Elliott Impulse': { short: 'EIE PRO', ver: 11 }, 'SK Sequence': { short: 'SK SEQ', ver: 17 } };
+const WANT = { 'Elliott Impulse': { short: 'EIE PRO', ver: 12 }, 'SK Sequence': { short: 'SK SEQ', ver: 18 } };
 const ASSET = (t) => /XAU|GOLD|^GC|^MGC/i.test(t) ? 'GOLD' : /WTI|USOIL|UKOIL|OIL|^CL|^MCL/i.test(t) ? 'CRUDE' : /BTC|XBT/i.test(t) ? 'BTC' : 'OTHER';
 const out = [];
 const add = (status, check, detail, fix) => out.push({ status, check, detail, ...(fix ? { fix } : {}) });
@@ -60,7 +60,7 @@ if (chart && bridgeOk) {
       asset === 'OTHER' ? 'Supported: gold (OANDA:XAUUSD), WTI crude (OANDA:WTICOUSD), Bitcoin (BITSTAMP:BTCUSD) only. Switch the chart symbol' : undefined);
     for (const [key, w] of Object.entries(WANT)) {
       const s = v.studies.find(n => n.includes(key));
-      if (!s) { add('FAIL', w.short + ' indicator', 'not on the chart', `Pine Editor → paste ~/eie-watch/pine/${w.short === 'EIE PRO' ? 'eie_pro_v11' : 'sk_engine_v17'}.pine → Save → Add to chart`); continue; }
+      if (!s) { add('FAIL', w.short + ' indicator', 'not on the chart', `Pine Editor → paste ~/eie-watch/pine/${w.short === 'EIE PRO' ? 'eie_pro_v12' : 'sk_engine_v18'}.pine → Save → Add to chart`); continue; }
       const ver = Number((s.match(/ v(\d+)/) || [])[1]);
       ver >= w.ver ? add('PASS', w.short + ' indicator', s) : add('WARN', w.short + ' indicator', `${s} (latest is v${w.ver})`, 'Replace the script with the version in ~/eie-watch/pine/ for gold/crude/BTC auto costs');
     }

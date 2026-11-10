@@ -24,7 +24,7 @@ bash scripts/install.sh
 node ~/eie-watch/doctor.mjs
 ~/eie-watch/start.sh --demo
 ```
-Then paste `pine/eie_pro_v11.pine` and `pine/sk_engine_v17.pine` into TradingView's Pine Editor (Save → Add to chart)
+Then paste `pine/eie_pro_v12.pine` and `pine/sk_engine_v18.pine` into TradingView's Pine Editor (Save → Add to chart)
 and run `~/eie-watch/start.sh --ui`.
 
 ## Supported assets
@@ -40,8 +40,8 @@ Only these three markets are supported for now: on any other symbol the indicato
 ## Layout
 | Path | What it is |
 |---|---|
-| `pine/eie_pro_v11.pine` | **EIE PRO**: Elliott impulse engine (fork of Elliott Impulse Engine by WillyAlgoTrader) with Auto-ML, macro, session filters, Monte Carlo |
-| `pine/sk_engine_v17.pine` | **SK SEQ**: SK System (0/A/B/C, WCL, counter-trend) with Auto-ML, macro, news blackout, Monte Carlo, Super Signal, SuperTrend AI (lite) |
+| `pine/eie_pro_v12.pine` | **EIE PRO**: Elliott impulse engine (fork of Elliott Impulse Engine by WillyAlgoTrader) with Auto-ML, macro, session filters, Monte Carlo |
+| `pine/sk_engine_v18.pine` | **SK SEQ**: SK System (0/A/B/C, WCL, counter-trend) with Auto-ML, macro, news blackout, Monte Carlo, Super Signal, SuperTrend AI (lite) |
 | `watcher/` | Node.js watcher (`eie-watch.mjs`), Monte Carlo worker, Operation Aurum dashboard |
 | `scripts/install.sh` · `start.sh` · `doctor.mjs` | Installer, launcher, health check |
 | `eie_setup.sh` | Single-file macOS installer (rebuilt with `scripts/pack-standalone.py`) |

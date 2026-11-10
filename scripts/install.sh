@@ -63,5 +63,5 @@ Installed. Next:
   ~/eie-watch/start.sh --ui                           live: alerts + dashboard (TradingView open, indicators on chart)
   ~/eie-watch/start.sh --ui --trade tv-dry            fill the Paper Trading order dialog but don't click Place
   ~/eie-watch/start.sh --ui --trade tv --ntfy TOPIC   place Paper Trading orders + phone pushes
-Indicators to paste into TradingView's Pine Editor: ~/eie-watch/pine/eie_pro_v11.pine and sk_engine_v17.pine
+Indicators to paste into TradingView's Pine Editor: ~/eie-watch/pine/eie_pro_v12.pine and sk_engine_v18.pine
 MSG
