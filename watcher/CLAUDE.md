@@ -1,7 +1,8 @@
-# EIE desk — instructions for Claude Code on this Mac
+# EIE desk — instructions for AI agents on this computer
 
-You are assisting a prop-firm trader (gold XAUUSD and WTI crude only) who trades the
-**Elliott Impulse Engine [WillyAlgoTrader]** (EIE) indicator on a **1-minute** TradingView Desktop chart.
+You are assisting a prop-firm trader (gold XAUUSD, WTI crude and Bitcoin BTCUSD) who trades the
+EIE PRO and SK SEQ indicators (EIE PRO is a fork of **Elliott Impulse Engine [WillyAlgoTrader]**)
+on 1m–15m TradingView Desktop charts.
 Think like a quant and an Elliott-wave practitioner: evidence over narrative.
 
 ## Tools
@@ -13,6 +14,10 @@ Think like a quant and an Elliott-wave practitioner: evidence over narrative.
   Read those files before answering questions about signals or repainting.
 - Do not change the chart's symbol or timeframe while the watcher runs unless the user asks
   (it would interrupt monitoring). Never place, modify or cancel orders.
+
+## Setup
+For installation, health checks and troubleshooting, follow the repo's `.claude/skills/operation-aurum/SKILL.md`,
+or run `node ~/eie-watch/doctor.mjs`.
 
 ## Facts about EIE (audited from its source, v0.9.0-dev)
 - No lookahead / no request.security; pivots used only on confirmed bars; CHoCH and (Close mode)
@@ -26,8 +31,10 @@ Think like a quant and an Elliott-wave practitioner: evidence over narrative.
 ## Trading rules to apply in every plan
 - Risk 0.5% per trade ($25 on a 5K account), strict 1:2 R:R, stop just beyond point 0
   (the INVALID level in wave 2), limit entry inside the W2 OTE box (default 0.618 of leg 0→1).
-- Max 3–5 trades/day, stop after 2 losses; one open trade at a time (gold and oil correlate).
+- Max 3–5 trades/day, stop after 2 losses; one open trade at a time across all assets.
 - No new entries 30 min before high-impact news (CPI, NFP, FOMC; crude: EIA Wed 10:30 ET, OPEC).
+  Bitcoin trades 24/7: weekend liquidity is thin, so treat weekend setups with extra caution.
+- Costs per asset (round trip): gold ~0.35, WTI ~0.04, BTC ~0.03% of price. The indicators use these automatically.
 - On 1m, cost (spread + slippage) is ~10–20% of R: reject setups whose stop is < 5× the spread.
 - Prefer setups aligned with the 15m/1H direction.
 

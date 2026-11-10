@@ -40,7 +40,7 @@
   .dot.demo { background: var(--amber); }
   .price { font-size: 20px; font-weight: 700; color: var(--fg); transition: color .25s; }
   .price.up { color: var(--green); } .price.dn { color: var(--red); }
-  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; margin-top: 14px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; margin-top: 14px; align-items: start; }
   @media (max-width: 1100px) { .grid { grid-template-columns: minmax(0, 1fr); } }
   .card { background: linear-gradient(180deg, rgba(10,22,17,.66), rgba(7,16,12,.58)); border: 1px solid var(--line); position: relative; backdrop-filter: blur(1.5px); }
   .card::before, .card::after { content: ""; position: absolute; width: 10px; height: 10px; border-color: var(--green); border-style: solid; opacity: .7; }
@@ -49,9 +49,13 @@
   .card h2 { margin: 0; padding: 8px 12px; font-family: var(--display); font-weight: 400; font-size: 12px; letter-spacing: .25em; color: var(--dim);
              border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 8px; }
   .card h2 span:last-child { color: var(--mute); }
-  .trackcard { display: flex; flex-direction: column; }
-  .chartbox { flex: 1; min-height: 470px; }
-  @media (max-width: 700px) { .chartbox { min-height: 340px; } }
+  .trackcard { display: flex; flex-direction: column; position: sticky; top: 12px; }
+  @media (max-width: 1100px) { .trackcard { position: relative; top: auto; } }
+  .chartbox { height: clamp(360px, 62vh, 640px); }
+  @media (max-width: 700px) { .chartbox { height: 340px; } }
+  .fitbtn { font: inherit; font-size: 10px; letter-spacing: .15em; color: var(--green); background: transparent; border: 1px solid var(--line2); padding: 1px 8px; cursor: pointer; margin-left: 8px; }
+  .fitbtn:hover { border-color: var(--green); }
+  .wr-top { position: relative; z-index: 1; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--dim); }
   .legend i { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: 3px; }
   .kv { width: 100%; border-collapse: collapse; }
@@ -193,14 +197,17 @@ function levelsFrom(panels) {
   return L.filter(l => Number.isFinite(l.price));
 }
 
-function Chart({ bars, levels, ov }) {
+function Chart({ bars, levels, ov, fitKey }) {
   const box = useRef(null), chart = useRef(null), series = useRef(null), lines = useRef([]), zl = useRef([]), fitted = useRef(false);
   useEffect(() => {
     const ch = LightweightCharts.createChart(box.current, {
       autoSize: true,
       layout: { background: { color: 'transparent' }, textColor: C.dim, fontFamily: 'JetBrains Mono, monospace', fontSize: 11 },
       grid: { vertLines: { color: 'rgba(18,53,36,.6)' }, horzLines: { color: 'rgba(18,53,36,.6)' } },
-      rightPriceScale: { borderColor: C.line }, timeScale: { borderColor: C.line, timeVisible: true, secondsVisible: false },
+      rightPriceScale: { borderColor: C.line, autoScale: true, scaleMargins: { top: 0.08, bottom: 0.08 } },
+      timeScale: { borderColor: C.line, timeVisible: true, secondsVisible: false, rightOffset: 6 },
+      handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: { time: true, price: false }, axisDoubleClickReset: true },
       crosshair: { vertLine: { color: C.green, labelBackgroundColor: '#0b2a1b' }, horzLine: { color: C.green, labelBackgroundColor: '#0b2a1b' } },
     });
     series.current = ch.addCandlestickSeries({ upColor: C.green, downColor: C.red, borderUpColor: C.green, borderDownColor: C.red, wickUpColor: C.green, wickDownColor: C.red });
@@ -212,8 +219,14 @@ function Chart({ bars, levels, ov }) {
     const data = bars.map(b => ({ time: b.time > 1e12 ? Math.floor(b.time / 1000) : b.time, open: b.open, high: b.high, low: b.low, close: b.close }))
       .filter((b, i, a) => i === 0 || b.time > a[i - 1].time);
     series.current.setData(data);
-    if (!fitted.current) { chart.current.timeScale().fitContent(); fitted.current = true; }
+    if (!fitted.current && data.length) { fitView(); fitted.current = true; }
   }, [bars]);
+  const fitView = () => {
+    const n = (bars || []).length; if (!chart.current || !n) return;
+    chart.current.priceScale('right').applyOptions({ autoScale: true });
+    chart.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 120), to: n + 5 });
+  };
+  useEffect(() => { if (fitKey) fitView(); }, [fitKey]);
   useEffect(() => {
     if (!series.current) return;
     lines.current.forEach(l => series.current.removePriceLine(l));
@@ -235,7 +248,7 @@ function Chart({ bars, levels, ov }) {
     });
     if (ov.trail) zl.current.push(s.createPriceLine({ price: ov.trail, color: C.cyan, lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'ST TRAIL' }));
   }, [JSON.stringify(ov), bars && bars.length]);
-  return html`<div class="chartbox" ref=${box}></div>`;
+  return html`<div class="chartbox" ref=${box} onDblClick=${fitView}></div>`;
 }
 
 function Dossier({ name, rows }) {
@@ -283,7 +296,7 @@ function Operation({ panels, last }) {
         <div><label for="units">UNITS PER LOT</label><input id="units" type="number" min="1" step="1" value=${units} onInput=${ev => setUnits(+ev.target.value || 0)} /></div>
       </div>
       <div class="out">
-        ${side === 'idle' ? html`Sizing appears when a limit is placed. Gold CFD: 100 units/lot · WTI: 1000.`
+        ${side === 'idle' ? html`Sizing appears when a limit is placed. Gold CFD: 100 units/lot · WTI: 1000 · BTC: sized in 0.001 BTC.`
           : html`Size <b>${fmt(dist ? risk / dist : null, 2)} units</b> (${fmt(lots, 3)} lots) · R:R ${fmt(rr, 2)} · stop ${fmt(dist)} · price ${toEntry == null ? '—' : (toEntry >= 0 ? '+' : '') + fmt(toEntry)} from entry
              ${dist && risk / dist < 1 ? html`<div style=${{ color: C.red, marginTop: '6px' }}>Stop too wide for $${risk} risk (under 1 unit): the bot skips this. Use a lower timeframe or raise risk.</div>` : null}`}
       </div>
@@ -519,6 +532,7 @@ function App() {
   const [st, setSt] = useState({ connected: false, demo: false, panels: {}, bars: [], events: [] });
   const [dir, setDir] = useState('');
   const [rain, setRainS] = useState(store.get('aurum.rain', true));
+  const [fitKey, setFitKey] = useState(0);
   const setRain = (v) => { setRainS(v); store.set('aurum.rain', v); };
   const prev = useRef(null);
   useEffect(() => {
@@ -553,10 +567,11 @@ function App() {
       </div>
     </header>
     <${SyncStrip} st=${st} />
+    <div class="wr-top"><${WarRoom} mc=${st.mc} rain=${rain} setRain=${setRain} /></div>
     <div class="grid">
       <section class="card trackcard">
-        <h2><span>TARGET TRACK · ${st.symbol || '—'}</span><span>${st.bars?.length || 0} BARS</span></h2>
-        <${Chart} bars=${st.bars} levels=${levels} ov=${st.overlays} />
+        <h2><span>TARGET TRACK · ${st.symbol || '—'}</span><span>${st.bars?.length || 0} BARS<button class="fitbtn" onClick=${() => setFitKey(k => k + 1)} title="Fit the last 120 bars (or double-click the chart)">FIT</button></span></h2>
+        <${Chart} bars=${st.bars} levels=${levels} ov=${st.overlays} fitKey=${fitKey} />
         <div class="legend">
           <span><i style=${{ background: C.amber }}></i>entry</span><span><i style=${{ background: C.red }}></i>stop / invalidation</span>
           <span><i style=${{ background: C.green }}></i>target</span><span><i style=${{ background: C.violet }}></i>SK 0 · A · B</span>
@@ -570,7 +585,6 @@ function App() {
         <${Dossier} name="SK SEQ" rows=${(st.panels || {})['SK SEQ']} />
       </div>
     </div>
-    <${WarRoom} mc=${st.mc} rain=${rain} setRain=${setRain} />
     <${Telemetry} tele=${st.tele} mc=${st.mc} />
     <${Log} events=${st.events || []} />
     <footer>Unofficial personal tool · reads your local TradingView Desktop · not financial advice</footer>
