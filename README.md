@@ -24,7 +24,7 @@ bash scripts/install.sh
 node ~/eie-watch/doctor.mjs
 ~/eie-watch/start.sh --demo
 ```
-Then paste `pine/eie_pro_v10.pine` and `pine/sk_engine_v16.pine` into TradingView's Pine Editor (Save → Add to chart)
+Then paste `pine/eie_pro_v11.pine` and `pine/sk_engine_v17.pine` into TradingView's Pine Editor (Save → Add to chart)
 and run `~/eie-watch/start.sh --ui`.
 
 ## Supported assets
@@ -35,13 +35,13 @@ and run `~/eie-watch/start.sh --ui`.
 | Bitcoin | `BITSTAMP:BTCUSD` | 0.03% of price | 0.001 BTC | — (trades 24/7) |
 
 CPI and NFP blackouts apply to all three. Add FOMC and other events in the indicators' "Extra events" input.
-Other symbols work with generic costs (0.02% of price).
+Only these three markets are supported for now: on any other symbol the indicators stop with a message (setting "Supported markets only") and the watcher does not trade. Any timeframe from 1m to 4H works; the trend filter picks the next higher timeframe automatically.
 
 ## Layout
 | Path | What it is |
 |---|---|
-| `pine/eie_pro_v10.pine` | **EIE PRO**: Elliott impulse engine (fork of Elliott Impulse Engine by WillyAlgoTrader) with Auto-ML, macro, session filters, Monte Carlo |
-| `pine/sk_engine_v16.pine` | **SK SEQ**: SK System (0/A/B/C, WCL, counter-trend) with Auto-ML, macro, news blackout, Monte Carlo, Super Signal, SuperTrend AI (lite) |
+| `pine/eie_pro_v11.pine` | **EIE PRO**: Elliott impulse engine (fork of Elliott Impulse Engine by WillyAlgoTrader) with Auto-ML, macro, session filters, Monte Carlo |
+| `pine/sk_engine_v17.pine` | **SK SEQ**: SK System (0/A/B/C, WCL, counter-trend) with Auto-ML, macro, news blackout, Monte Carlo, Super Signal, SuperTrend AI (lite) |
 | `watcher/` | Node.js watcher (`eie-watch.mjs`), Monte Carlo worker, Operation Aurum dashboard |
 | `scripts/install.sh` · `start.sh` · `doctor.mjs` | Installer, launcher, health check |
 | `eie_setup.sh` | Single-file macOS installer (rebuilt with `scripts/pack-standalone.py`) |

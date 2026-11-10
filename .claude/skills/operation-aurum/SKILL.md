@@ -55,13 +55,14 @@ problems are in [references/troubleshooting.md](references/troubleshooting.md).
 
 ## Step 4: indicators (the user does this in TradingView)
 Free TradingView plan = max 2 indicators, so both scripts bundle everything. For each file
-`~/eie-watch/pine/eie_pro_v10.pine` and `~/eie-watch/pine/sk_engine_v16.pine`:
+`~/eie-watch/pine/eie_pro_v11.pine` and `~/eie-watch/pine/sk_engine_v17.pine`:
 1. TradingView → **Pine Editor** (bottom panel) → **⋯/Open → New indicator**.
 2. Select all (Cmd/Ctrl+A), delete, paste the whole file. Don't paste on top of the template.
 3. **Save** (name it), then **Add to chart**.
 
 Then in **SK SEQ settings**, set "EIE direction source" to `EIE PRO: EIE direction`.
-Use timeframe 1m to 15m. Costs and round numbers adapt to the asset automatically. The panel shows `GOLD`, `CRUDE` or `BTC`.
+Any timeframe from 1m to 4H works. The trend filter automatically uses the next higher timeframe (3m→15m, 5m/15m→1H, 30m/1H→4H). Costs and round numbers adapt to the asset. The panels show `GOLD`, `CRUDE` or `BTC`.
+Only gold, crude oil and Bitcoin are supported: on other symbols the indicators stop with a message and the watcher does not trade.
 Re-run the doctor; both indicators should be PASS.
 
 ## Step 5: run it

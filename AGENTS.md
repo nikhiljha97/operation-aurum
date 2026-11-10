@@ -19,7 +19,7 @@ node ~/eie-watch/doctor.mjs --json    # health check; every failure includes a f
 - Never commit secrets, logs (`events.jsonl`, `trades.csv`) or `node_modules`.
 
 ## Layout
-- `pine/`: TradingView indicators, current `eie_pro_v10.pine` and `sk_engine_v16.pine`; old versions in `pine/archive/`.
+- `pine/`: TradingView indicators, current `eie_pro_v11.pine` and `sk_engine_v17.pine`; old versions in `pine/archive/`.
   The free plan allows 2 indicators and 0.5 s of script time, so keep new features inside these two and stay light.
 - `watcher/`: Node.js watcher (`eie-watch.mjs`), Monte Carlo worker, dashboard (`ui.html`).
   Run `node watcher/eie-watch.mjs --selftest` after any change. It must print `SELFTEST PASS`.

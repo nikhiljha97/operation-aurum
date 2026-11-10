@@ -46,7 +46,7 @@ const CFG = {
   stopBuffer: Number(arg('--buffer', 0)),       // price buffer beyond point 0 for the stop
   entryFib: Number(arg('--entry', 0.618)),      // W2 limit entry as retracement of leg 0→1
   rr: Number(arg('--rr', 2)),
-  wantTf: arg('--tf', '1'),
+  wantTf: arg('--tf', ''),                    // '' = any timeframe (1m–4H); set e.g. --tf 3 to warn when the chart is on another one
   notify: !flag('--no-notify'),
   filter: arg('--study', 'Elliott Impulse'),
   skFilter: arg('--sk', 'SK Sequence'),
@@ -69,7 +69,7 @@ if (flag('--selftest')) { CFG.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eie-s
 fs.mkdirSync(CFG.dir, { recursive: true });
 const EVENTS = path.join(CFG.dir, 'events.jsonl');
 
-// ── supported assets: gold, WTI crude, Bitcoin (anything else gets the generic profile) ──
+// ── supported assets: gold, crude oil, Bitcoin. Other symbols are never traded (GENERIC is only used for display) ──
 // step = smallest order size in units; spread = round-trip cost per unit in price (paper P&L only).
 const ASSETS = [
   { name: 'GOLD',  re: /XAU|GOLD|^GC|^MGC/i,             step: 1,     spread: () => 0.35,       oanda: 'XAU_USD' },
@@ -243,7 +243,7 @@ function process1(snap) {
 
   if (!snap.studyFound) { if (!T.flags.noStudy) out.push(log({ type: 'NO_INDICATOR', symbol: sym, msg: `EIE not found on chart (filter "${CFG.filter}")` })); T.flags.noStudy = true; return out; }
   T.flags.noStudy = false;
-  if (snap.tf !== CFG.wantTf && !T.flags.tfWarn) { out.push(log({ type: 'TF_WARNING', symbol: sym, msg: `chart TF is ${snap.tf}, expected ${CFG.wantTf}` })); T.flags.tfWarn = true; }
+  if (CFG.wantTf && snap.tf !== CFG.wantTf && !T.flags.tfWarn) { out.push(log({ type: 'TF_WARNING', symbol: sym, msg: `chart TF is ${snap.tf}, expected ${CFG.wantTf}` })); T.flags.tfWarn = true; }
 
   const P = T.prev;
   // Reload / history-shift detection → compare live-recorded CHoCHs with recomputed history
@@ -519,6 +519,7 @@ function makeBroker(mode) {
       const lvls = parseLv(lv); const side = /LONG/i.test(sig) ? 1 : /SHORT/i.test(sig) ? -1 : 0;
       const skip = (why) => { st.note = why; log({ type: 'BOT_SKIP', symbol: snap.symbol, msg: `${src}: ${why}` }); };
       if (!CFG.tradeFrom.includes(src)) return;
+      if (assetOf(snap.symbol) === GENERIC) return skip(`${snap.symbol} is not supported: XAU, OIL and BTC only`);
       if (!lvls || !side) return skip('could not read levels');
       if (st.busy) return skip('another order is being placed');
       if (st.order || st.pos) return skip('already have an order/position');

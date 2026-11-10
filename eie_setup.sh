@@ -71,7 +71,7 @@ const CFG = {
   stopBuffer: Number(arg('--buffer', 0)),       // price buffer beyond point 0 for the stop
   entryFib: Number(arg('--entry', 0.618)),      // W2 limit entry as retracement of leg 0→1
   rr: Number(arg('--rr', 2)),
-  wantTf: arg('--tf', '1'),
+  wantTf: arg('--tf', ''),                    // '' = any timeframe (1m–4H); set e.g. --tf 3 to warn when the chart is on another one
   notify: !flag('--no-notify'),
   filter: arg('--study', 'Elliott Impulse'),
   skFilter: arg('--sk', 'SK Sequence'),
@@ -94,7 +94,7 @@ if (flag('--selftest')) { CFG.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eie-s
 fs.mkdirSync(CFG.dir, { recursive: true });
 const EVENTS = path.join(CFG.dir, 'events.jsonl');
 
-// ── supported assets: gold, WTI crude, Bitcoin (anything else gets the generic profile) ──
+// ── supported assets: gold, crude oil, Bitcoin. Other symbols are never traded (GENERIC is only used for display) ──
 // step = smallest order size in units; spread = round-trip cost per unit in price (paper P&L only).
 const ASSETS = [
   { name: 'GOLD',  re: /XAU|GOLD|^GC|^MGC/i,             step: 1,     spread: () => 0.35,       oanda: 'XAU_USD' },
@@ -268,7 +268,7 @@ function process1(snap) {
 
   if (!snap.studyFound) { if (!T.flags.noStudy) out.push(log({ type: 'NO_INDICATOR', symbol: sym, msg: `EIE not found on chart (filter "${CFG.filter}")` })); T.flags.noStudy = true; return out; }
   T.flags.noStudy = false;
-  if (snap.tf !== CFG.wantTf && !T.flags.tfWarn) { out.push(log({ type: 'TF_WARNING', symbol: sym, msg: `chart TF is ${snap.tf}, expected ${CFG.wantTf}` })); T.flags.tfWarn = true; }
+  if (CFG.wantTf && snap.tf !== CFG.wantTf && !T.flags.tfWarn) { out.push(log({ type: 'TF_WARNING', symbol: sym, msg: `chart TF is ${snap.tf}, expected ${CFG.wantTf}` })); T.flags.tfWarn = true; }
 
   const P = T.prev;
   // Reload / history-shift detection → compare live-recorded CHoCHs with recomputed history
@@ -544,6 +544,7 @@ function makeBroker(mode) {
       const lvls = parseLv(lv); const side = /LONG/i.test(sig) ? 1 : /SHORT/i.test(sig) ? -1 : 0;
       const skip = (why) => { st.note = why; log({ type: 'BOT_SKIP', symbol: snap.symbol, msg: `${src}: ${why}` }); };
       if (!CFG.tradeFrom.includes(src)) return;
+      if (assetOf(snap.symbol) === GENERIC) return skip(`${snap.symbol} is not supported: XAU, OIL and BTC only`);
       if (!lvls || !side) return skip('could not read levels');
       if (st.busy) return skip('another order is being placed');
       if (st.order || st.pos) return skip('already have an order/position');
@@ -1897,7 +1898,7 @@ const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf(k); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const W = path.join(os.homedir(), 'eie-watch');
 const BRIDGE = path.join(os.homedir(), 'tradingview-mcp');
-const WANT = { 'Elliott Impulse': { short: 'EIE PRO', ver: 10 }, 'SK Sequence': { short: 'SK SEQ', ver: 16 } };
+const WANT = { 'Elliott Impulse': { short: 'EIE PRO', ver: 11 }, 'SK Sequence': { short: 'SK SEQ', ver: 17 } };
 const ASSET = (t) => /XAU|GOLD|^GC|^MGC/i.test(t) ? 'GOLD' : /WTI|USOIL|UKOIL|OIL|^CL|^MCL/i.test(t) ? 'CRUDE' : /BTC|XBT/i.test(t) ? 'BTC' : 'OTHER';
 const out = [];
 const add = (status, check, detail, fix) => out.push({ status, check, detail, ...(fix ? { fix } : {}) });
@@ -1941,11 +1942,11 @@ if (chart && bridgeOk) {
     if (!v) throw new Error(r.exceptionDetails ? r.exceptionDetails.text : 'no result');
     const tick = String(v.symbol).split(':').pop();
     const asset = ASSET(tick);
-    add(asset === 'OTHER' ? 'WARN' : 'PASS', 'Chart symbol', `${v.symbol} · ${v.tf}m · asset ${asset}`,
-      asset === 'OTHER' ? 'Supported: gold (OANDA:XAUUSD), WTI crude (OANDA:WTICOUSD), Bitcoin (BITSTAMP:BTCUSD); others use generic costs' : undefined);
+    add(asset === 'OTHER' ? 'FAIL' : 'PASS', 'Chart symbol', `${v.symbol} · ${v.tf}m · asset ${asset}`,
+      asset === 'OTHER' ? 'Supported: gold (OANDA:XAUUSD), WTI crude (OANDA:WTICOUSD), Bitcoin (BITSTAMP:BTCUSD) only. Switch the chart symbol' : undefined);
     for (const [key, w] of Object.entries(WANT)) {
       const s = v.studies.find(n => n.includes(key));
-      if (!s) { add('FAIL', w.short + ' indicator', 'not on the chart', `Pine Editor → paste ~/eie-watch/pine/${w.short === 'EIE PRO' ? 'eie_pro_v10' : 'sk_engine_v16'}.pine → Save → Add to chart`); continue; }
+      if (!s) { add('FAIL', w.short + ' indicator', 'not on the chart', `Pine Editor → paste ~/eie-watch/pine/${w.short === 'EIE PRO' ? 'eie_pro_v11' : 'sk_engine_v17'}.pine → Save → Add to chart`); continue; }
       const ver = Number((s.match(/ v(\d+)/) || [])[1]);
       ver >= w.ver ? add('PASS', w.short + ' indicator', s) : add('WARN', w.short + ' indicator', `${s} (latest is v${w.ver})`, 'Replace the script with the version in ~/eie-watch/pine/ for gold/crude/BTC auto costs');
     }
@@ -1995,7 +1996,7 @@ say "6/6 Done"
 cat <<'MSG'
 Next:
   1. In TradingView: a gold, WTI crude or Bitcoin chart (1m-15m) with your two indicators, EIE PRO and SK SEQ
-     (scripts: pine/eie_pro_v10.pine and pine/sk_engine_v16.pine in the GitHub repo; health check: node ~/eie-watch/doctor.mjs)
+     (scripts: pine/eie_pro_v11.pine and pine/sk_engine_v17.pine in the GitHub repo; health check: node ~/eie-watch/doctor.mjs)
      (SK setting "EIE direction source" = EIE PRO: EIE direction).
   2. Start watching (Mac notifications when EIE PRO / SK SEQ place, move, fill or cancel a limit):
        ~/eie-watch/start.sh
