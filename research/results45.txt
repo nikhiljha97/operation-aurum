@@ -1,0 +1,10 @@
+Win rate 45%, 1:2 R:R, cost 0.08R/trade, 200k sims each
+account                         fee  pass fund->pay P(payout) E[payout] EV/fee eval trades funded trades
+The5ers HS 5K Classic r=$50    $ 39  0.89      0.95      0.84 $     135   3.5x          46            15
+The5ers HS 5K New r=$50        $ 35  0.89      0.95      0.84 $     134   3.8x          53            15
+Maven 5K 2-Step r=$50          $ 22  0.81      0.92      0.74 $     136   6.2x          42            14
+The5ers HS 5K Classic r=$25    $ 39  0.99      0.99      0.98 $     158   4.0x         101            32
+The5ers HS 5K New r=$25        $ 35  0.99      1.00      0.98 $     158   4.5x         116            32
+Maven 5K 2-Step r=$25          $ 22  0.97      0.99      0.96 $     174   7.9x          99            31
+Lucid 25K Flex EOD r=$125      $ 50  0.75      0.79      0.60 $     269   5.4x          26            22
+Lucid 25K Flex EOD r=$100      $ 50  0.82      0.85      0.70 $     314   6.3x          37            31

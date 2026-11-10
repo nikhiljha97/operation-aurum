@@ -1,0 +1,10 @@
+node_modules/
+vendor/
+*.log
+events.jsonl
+ledger.json
+report.txt
+trades.csv
+demo/
+.DS_Store
+.env

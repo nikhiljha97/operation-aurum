@@ -1,0 +1,1487 @@
+//@version=6
+// ══════════════════════════════════════════════════════════════════════════
+// SK SEQUENCE ENGINE — personal-use implementation of the SK System workflow
+// (Stefan Kassing) as a rule-based state machine, with an honest trade ledger.
+//
+// Flowchart mapping (numbers = boxes in the SK workflow chart):
+//  5/6   Point 0 = absolute high/low (start of a move); Point A = following sub-high/low
+//  8-10  Correction must exceed 0.382 of 0→A, else no sequence / no trade (A may extend)
+//  11-12 Entries 0.500 · 0.559 · 0.618 · 0.667 of 0→A
+//  13-17 Clearly beyond the retracement level → trade invalid; beyond Point 0 → sequence invalid
+//  18,30 Break of A activates the sequence; target C = 161.8–200 % extension of A→B
+//  19-24 C not reached → B→C retracement entries 0.500–0.667 of B→high
+//  25-29 Beyond B → sequence invalid; Point 0/C becomes new Point 0/A (re-seed)
+//  31-34 At C: counter-trend entries 1.618 · 1.809 · 2.000, invalid beyond 2.000 (optional)
+//  35-48 WCL: after C, whole move 0→C retraces > 0.382 → entries 0.500–0.667 of 0→C (own column),
+//        a new high/low activates the next sequence
+//  Learner: online logistic / small neural net estimates P(fill) and P(win) per setup (walk-forward)
+//  TM 4.2/4.3 Stop to breakeven before double profit; otherwise stop is never moved
+// All logic runs on confirmed bars only (no repainting); pivots are used after confirmation.
+// ══════════════════════════════════════════════════════════════════════════
+indicator("SK Sequence Engine v15 (personal implementation)", "SK SEQ", overlay = true, max_lines_count = 300, max_labels_count = 300, max_boxes_count = 100, max_bars_back = 500)
+
+G1 = "① Sequence"
+G2 = "② Entries & trade management"
+G3 = "③ Filters"
+G4 = "④ Display"
+pivLen   = input.int(5, "Pivot length (bars each side)", minval = 2, group = G1)
+zeroLook = input.int(100, "Point 0 = absolute high/low of last N bars", minval = 20, group = G1)
+minLeg   = input.float(2.0, "Min leg 0→A (× ATR)", minval = 0, step = 0.25, group = G1)
+confLvl  = input.float(0.382, "Confirmation retracement", step = 0.001, group = G1)
+c1Lvl    = input.float(1.618, "C target zone of A→B (from / to)", step = 0.001, group = G1, inline = "c")
+c2Lvl    = input.float(2.0, "", step = 0.001, group = G1, inline = "c")
+invMode  = input.string("Close", "Sequence invalid on", options = ["Close", "Wick"], group = G1)
+dirMode  = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = G1)
+subOn    = input.bool(true, "Newer sub-sequences replace the active one", group = G1,
+     tooltip = "SK note 2: a sequence inside a movement may come from an active larger sequence. Keeps lower timeframes (1m/3m) on the current structure instead of a stale large leg.")
+
+entryStr = input.string("0.559", "Entry level", options = ["0.500", "0.559", "0.618", "0.667"], group = G2)
+invLvl   = input.float(0.786, "'Clearly exceeds' level (trade invalid)", step = 0.001, group = G2)
+takeB    = input.bool(true, "Trade B retracement (0→A)", group = G2)
+takeBC   = input.bool(true, "Trade B→C retracement", group = G2)
+takeCT   = input.bool(false, "Counter-trend at C (1.618–2.000)", group = G2)
+ctLvlStr = input.string("1.809", "Counter-trend entry", options = ["1.618", "1.809", "2.000"], group = G2)
+slMode   = input.string("Beyond point 0 / B", "Stop", options = ["Beyond point 0 / B", "Beyond 'clearly exceeds' level"], group = G2)
+bufAtr   = input.float(0.25, "Stop buffer (× ATR)", minval = 0, step = 0.05, group = G2)
+roundOn  = input.bool(true, "Push stop beyond round number · step (0 = auto)", group = G2, inline = "rn")
+roundStp = input.float(0, "", minval = 0, step = 0.5, group = G2, inline = "rn")
+roundZn  = input.float(0.5, "Round-number reach (× ATR)", minval = 0, step = 0.1, group = G2)
+tpMode   = input.string("Fixed R:R", "Take profit", options = ["Fixed R:R", "SK C target (161.8)", "Point A (100%)"], group = G2)
+rr       = input.float(2.0, "Reward : risk (fixed mode)", minval = 0.5, step = 0.25, group = G2)
+beOn     = input.bool(true, "Breakeven at +1R (SK TM 4.2)", group = G2)
+cost     = input.float(0.35, "Round-trip cost in price (spread + slippage)", minval = 0, step = 0.01, group = G2,
+     tooltip = "Gold CFD ~0.25-0.40, WTI CFD ~0.03-0.05. Deducted from every trade in the stats.")
+minRC    = input.float(5.0, "Min stop distance (× cost)", minval = 0, step = 0.5, group = G2)
+maxLossD = input.int(2, "Max losses per day, filtered (0 = off)", minval = 0, group = G2)
+oosDays  = input.int(7, "Out-of-sample window (last N days)", minval = 1, group = G2)
+
+applyF   = input.bool(true, "Apply filters (RAW column always unfiltered)", group = G3)
+htfOn    = input.bool(true, "HTF trend alignment", group = G3, inline = "htf")
+htfTf    = input.timeframe("15", "", group = G3, inline = "htf")
+htfLen   = input.int(50, "HTF EMA length", minval = 5, group = G3)
+vrOn     = input.bool(true, "Variance ratio ≥", group = G3, inline = "vr")
+vrMin    = input.float(1.0, "", step = 0.05, group = G3, inline = "vr")
+vrQ      = input.int(8, "VR horizon q / window", minval = 2, group = G3, inline = "vrq")
+vrN      = input.int(400, "", minval = 50, group = G3, inline = "vrq")
+timeMode = input.string("Adaptive hours", "Timing filter", options = ["Adaptive hours", "Fixed session", "Off"], group = G3)
+hrMin    = input.float(1.0, "Adaptive: min hour activity", step = 0.05, group = G3)
+sessStr  = input.session("0300-1200", "Fixed session (New York time)", group = G3)
+eieAgree = input.bool(false, "Require EIE agreement", group = G3,
+     tooltip = "Only trade when EIE PRO points the same way or is neutral. Set the source below to 'EIE PRO: EIE direction'.")
+eieSrc   = input.source(close, "EIE direction source", group = G3)
+
+showZones = input.bool(true, "Show entry zone / C target / point 0", group = G4)
+showLbls  = input.bool(true, "Show 0 · A · B · C labels", group = G4)
+showRes   = input.bool(true, "Mark trade results", group = G4)
+showPanel = input.bool(true, "Compact panel", group = G4)
+panelPos  = input.string("Bottom right", "Panel position", options = ["Top right", "Bottom right", "Bottom left", "Top left"], group = G4)
+showStats = input.bool(false, "Detailed statistics table", group = G4)
+
+float entryLvl = str.tonumber(entryStr)
+float ctLvl    = str.tonumber(ctLvlStr)
+bool  invClose = invMode == "Close"
+bool  allowL   = dirMode != "Short only"
+bool  allowS   = dirMode != "Long only"
+
+// ── unconditional series ───────────────────────────────────────────────────
+float atr     = ta.atr(14)
+float atrSlow = ta.atr(1440)
+float atrPct  = ta.percentrank(atr, 500)
+float trv     = ta.tr(true)
+float plRaw   = ta.pivotlow(pivLen, pivLen)
+float phRaw   = ta.pivothigh(pivLen, pivLen)
+float pl      = barstate.isconfirmed ? plRaw : na
+float ph      = barstate.isconfirmed ? phRaw : na
+float llZ     = ta.lowest(low, zeroLook)
+float hhZ     = ta.highest(high, zeroLook)
+float hhP     = ta.highest(high, pivLen)
+float llP     = ta.lowest(low, pivLen)
+int   hhPb    = ta.highestbars(high, pivLen)
+int   llPb    = ta.lowestbars(low, pivLen)
+float htfE1   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen)[1], lookahead = barmerge.lookahead_on)
+float htfE2   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen)[2], lookahead = barmerge.lookahead_on)
+float htfC1   = request.security(syminfo.tickerid, htfTf, close[1], lookahead = barmerge.lookahead_on)
+int   htfBias = na(htfE1) or na(htfE2) ? 0 : htfC1 > htfE1 and htfE1 > htfE2 ? 1 : htfC1 < htfE1 and htfE1 < htfE2 ? -1 : 0
+float r1      = math.log(close / close[1])
+float rq      = math.log(close / close[vrQ])
+float v1      = ta.variance(r1, vrN)
+float vq      = ta.variance(rq, vrN)
+float VR      = na(v1) or v1 <= 0 ? na : vq / (vrQ * v1)
+bool  inSess  = not na(time(timeframe.period, sessStr, "America/New_York"))
+float stepR   = roundStp > 0 ? roundStp : close > 1000 ? 10.0 : close > 100 ? 1.0 : close > 10 ? 0.5 : 0.05
+
+// Hour-of-day activity profile (learned)
+var array<float> hrProf = array.new<float>(24, na)
+int   hrNow  = hour(time, "America/New_York")
+float hrVal  = array.get(hrProf, hrNow)
+float hrSum  = 0.0
+int   hrCnt  = 0
+for v in hrProf
+    if not na(v)
+        hrSum += v
+        hrCnt += 1
+float hrAct = hrCnt >= 12 and not na(hrVal) and hrSum > 0 ? hrVal / (hrSum / hrCnt) : na
+if barstate.isconfirmed and not na(atrSlow) and atrSlow > 0
+    array.set(hrProf, hrNow, na(hrVal) ? trv / atrSlow : hrVal + 0.05 * (trv / atrSlow - hrVal))
+bool okTime = timeMode == "Off" ? true : timeMode == "Fixed session" ? inSess : na(hrAct) ? inSess : hrAct >= hrMin
+
+// ══════════════════════════════════════════════════════════════════════════
+// MACRO · CALENDAR · SESSIONS
+//  • Gold vs US 10Y yield and the dollar (DXY): rolling correlation of returns and momentum.
+//    Macro bias = the direction implied by falling/rising yields and dollar, counted only while
+//    gold's inverse correlation with them actually holds on this chart.
+//  • News blackout: CPI release days (detected from TradingView's CPI series), NFP (first Friday),
+//    EIA crude inventories (Wednesday, oil symbols only), plus your own extra events (e.g. FOMC).
+//  • Sessions / weekdays: win rates learned from resolved setups (Bayesian shrinkage to the overall
+//    rate), turned into "edge" features for the learner.
+// ══════════════════════════════════════════════════════════════════════════
+G7 = "⑦ Macro · calendar · sessions"
+macFilt  = input.bool(false, "Require macro alignment (yields / dollar)", group = G7,
+     tooltip = "Only trade in the direction implied by yields and the dollar, and only while gold's inverse correlation with them holds.")
+yldSym   = input.symbol("TVC:US10Y", "US 10Y yield", group = G7)
+dxySym   = input.symbol("TVC:DXY", "US dollar index", group = G7)
+corrLen  = input.int(240, "Correlation window (bars)", minval = 30, group = G7)
+momLen   = input.int(30, "Yield / dollar momentum (bars)", minval = 5, group = G7)
+newsOn   = input.bool(true, "News blackout (CPI days, NFP, EIA for oil, extra events)", group = G7)
+newsPre  = input.int(10, "Blackout minutes before / after", minval = 0, group = G7, inline = "nw")
+newsPost = input.int(30, "", minval = 0, group = G7, inline = "nw")
+cpiSym   = input.symbol("ECONOMICS:USCPI", "CPI series (release-day detection)", group = G7)
+extraEv  = input.string("", "Extra events, NY time (YYYYMMDD-HHMM, comma separated)", group = G7,
+     tooltip = "e.g. 20261209-1400 for an FOMC decision at 2:00 pm New York time.")
+calPrior = input.int(10, "Session / weekday prior strength (trades)", minval = 1, group = G7)
+
+float yld  = request.security(yldSym, timeframe.period, close, lookahead = barmerge.lookahead_off)
+float dxy  = request.security(dxySym, timeframe.period, close, lookahead = barmerge.lookahead_off)
+float cpiV = request.security(cpiSym, "D", close, lookahead = barmerge.lookahead_off)
+float gRet = math.log(close / close[1])
+float yChg = yld - yld[1]
+float dRet = math.log(dxy / dxy[1])
+float corrGY = ta.correlation(gRet, yChg, corrLen)
+float corrGD = ta.correlation(gRet, dRet, corrLen)
+float yMom = yld - yld[momLen]
+float dMom = math.log(dxy / dxy[momLen])
+int macBias = 0
+if not na(corrGY) and not na(corrGD) and not na(yMom) and not na(dMom)
+    float mv = (corrGY < -0.1 ? -math.sign(yMom) : 0.0) + (corrGD < -0.1 ? -math.sign(dMom) : 0.0)
+    macBias := mv > 0 ? 1 : mv < 0 ? -1 : 0
+
+// New York calendar
+int nyY    = year(time, "America/New_York")
+int nyMo   = month(time, "America/New_York")
+int nyD    = dayofmonth(time, "America/New_York")
+int nyDate = nyY * 10000 + nyMo * 100 + nyD
+int nyMin  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+int nyDow  = dayofweek(time, "America/New_York")      // 1 = Sunday … 7 = Saturday
+var int cpiDate = 0
+if not na(cpiV) and not na(cpiV[1]) and cpiV != cpiV[1]
+    cpiDate := nyDate
+f_inWin(int rel) => nyMin >= rel - newsPre and nyMin <= rel + newsPost
+var array<int> exDate = array.new<int>()
+var array<int> exMin  = array.new<int>()
+if barstate.isfirst and str.length(extraEv) > 0
+    for e in str.split(extraEv, ",")
+        array<string> pr = str.split(str.trim(e), "-")
+        if array.size(pr) == 2
+            float dv = str.tonumber(array.get(pr, 0))
+            float hv = str.tonumber(array.get(pr, 1))
+            if not na(dv) and not na(hv)
+                array.push(exDate, int(dv))
+                array.push(exMin, int(math.floor(hv / 100)) * 60 + int(hv % 100))
+bool exBlk = false
+if array.size(exDate) > 0
+    for i = 0 to array.size(exDate) - 1
+        if array.get(exDate, i) == nyDate and f_inWin(array.get(exMin, i))
+            exBlk := true
+bool isOil  = str.contains(syminfo.ticker, "OIL") or str.contains(syminfo.ticker, "WTI") or str.startswith(syminfo.ticker, "CL") or str.startswith(syminfo.ticker, "MCL")
+bool cpiBlk = cpiDate == nyDate and f_inWin(510)
+bool nfpBlk = nyDow == dayofweek.friday and nyD <= 7 and f_inWin(510)
+bool eiaBlk = isOil and nyDow == dayofweek.wednesday and f_inWin(630)
+bool newsBlk = newsOn and (cpiBlk or nfpBlk or eiaBlk or exBlk)
+string newsWhy = cpiBlk ? "CPI" : nfpBlk ? "NFP" : eiaBlk ? "EIA" : exBlk ? "event" : ""
+
+// Sessions (New York time): 0 Asia 19:00–03:00 · 1 London 03:00–08:00 · 2 NY AM 08:00–12:00 · 3 NY PM 12:00–19:00
+int sessId = nyMin >= 1140 or nyMin < 180 ? 0 : nyMin < 480 ? 1 : nyMin < 720 ? 2 : 3
+var array<float> sesW = array.new<float>(4, 0.0)
+var array<float> sesN = array.new<float>(4, 0.0)
+var array<float> dowW = array.new<float>(7, 0.0)
+var array<float> dowN = array.new<float>(7, 0.0)
+var float calW = 0.0
+var float calN = 0.0
+f_edge(array<float> w, array<float> n, int i) =>
+    float base = (calW + 1.0) / (calN + 2.0)
+    (array.get(w, i) + calPrior * base) / (array.get(n, i) + calPrior) - base
+float sessEdge = f_edge(sesW, sesN, sessId)
+float dowEdge  = f_edge(dowW, dowN, nyDow - 1)
+f_sessName(int s) => s == 0 ? "Asia" : s == 1 ? "London" : s == 2 ? "NY AM" : "NY PM"
+f_dowName(int d) => d == 1 ? "Sun" : d == 2 ? "Mon" : d == 3 ? "Tue" : d == 4 ? "Wed" : d == 5 ? "Thu" : d == 6 ? "Fri" : "Sat"
+
+// Monte Carlo sample stores (filled by the trade ledger)
+var array<float> mcRF = array.new<float>()   // filtered trades (B, B→C, WCL, counter)
+var array<float> mcRR = array.new<float>()   // RAW B/WCL setups
+
+// ══════════════════════════════════════════════════════════════════════════
+// MONTE CARLO — prop-firm odds from your own trade results
+// Resamples (with replacement) the R results this chart has produced, 1,000 times, as future
+// trade sequences at your risk per trade, and measures: chance of reaching the profit target
+// before the static max loss, chance of breaching it, and the drawdown / losing-streak spread.
+// ══════════════════════════════════════════════════════════════════════════
+G8 = "⑧ Monte Carlo (prop-firm odds)"
+mcOn      = input.bool(true, "Monte Carlo on the panel", group = G8)
+mcSrc     = input.string("Filtered", "Trades to resample", options = ["Filtered", "RAW"], group = G8)
+mcPaths   = input.int(400, "Paths", minval = 100, maxval = 1000, group = G8)
+mcHorizon = input.int(120, "Max trades per path", minval = 20, maxval = 300, group = G8)
+mcRisk    = input.float(0.5, "Risk per trade (% of account)", minval = 0.05, step = 0.05, group = G8)
+mcTarget  = input.float(8.0, "Profit target (%)", minval = 0.5, step = 0.5, group = G8)
+mcMaxLoss = input.float(10.0, "Max loss from start (%)", minval = 1, step = 0.5, group = G8)
+mcMinN    = input.int(20, "Min trades before simulating", minval = 5, group = G8)
+
+// Incremental Monte Carlo: each closed bar simulates only mcChunk new paths into a rolling window of
+// the last mcPaths paths (keeps every single bar far below TradingView's 0.5 s execution limit).
+mcChunk = input.int(25, "Paths simulated per closed bar", minval = 5, maxval = 100, group = G8)
+var array<float> mcOutA = array.new<float>()    // +1 reached target · −1 breached · 0 neither
+var array<float> mcDDA  = array.new<float>()
+var array<float> mcSTA  = array.new<float>()
+var array<float> mcSeedA = array.from(12345.0)
+f_mcChunk(array<float> rs, int paths) =>
+    int n = array.size(rs)
+    float seed = array.get(mcSeedA, 0)
+    for p = 1 to paths
+        float eq = 0.0
+        float peak = 0.0
+        float mdd = 0.0
+        int run = 0
+        int mrun = 0
+        float res = 0.0
+        for k = 1 to mcHorizon
+            seed := (seed * 16807.0) % 2147483647.0
+            int idx = math.min(int(math.floor(seed / 2147483647.0 * n)), n - 1)
+            float r = array.get(rs, idx)
+            eq += r * mcRisk
+            peak := math.max(peak, eq)
+            mdd := math.max(mdd, peak - eq)
+            run := r < 0 ? run + 1 : 0
+            mrun := math.max(mrun, run)
+            if eq >= mcTarget
+                res := 1.0
+                break
+            if eq <= -mcMaxLoss
+                res := -1.0
+                break
+        array.push(mcOutA, res)
+        array.push(mcDDA, mdd)
+        array.push(mcSTA, mrun)
+    while array.size(mcOutA) > mcPaths
+        array.shift(mcOutA)
+        array.shift(mcDDA)
+        array.shift(mcSTA)
+    array.set(mcSeedA, 0, seed)
+    true
+
+f_mcSim(array<float> rs) =>
+    int n = array.size(rs)
+    float pass = 0.0
+    float bust = 0.0
+    array<float> dds = array.new<float>()
+    array<float> strk = array.new<float>()
+    float seed = 12345.0
+    int mcPathsEff = math.max(50, math.min(mcPaths, int(40000 / mcHorizon)))   // work cap
+    for p = 1 to mcPathsEff
+        float eq = 0.0
+        float peak = 0.0
+        float mdd = 0.0
+        int run = 0
+        int mrun = 0
+        for k = 1 to mcHorizon
+            seed := (seed * 16807.0) % 2147483647.0
+            int idx = math.min(int(math.floor(seed / 2147483647.0 * n)), n - 1)
+            float r = array.get(rs, idx)
+            eq += r * mcRisk
+            peak := math.max(peak, eq)
+            mdd := math.max(mdd, peak - eq)
+            run := r < 0 ? run + 1 : 0
+            mrun := math.max(mrun, run)
+            if eq >= mcTarget
+                pass += 1
+                break
+            if eq <= -mcMaxLoss
+                bust += 1
+                break
+        array.push(dds, mdd)
+        array.push(strk, mrun)
+    [pass / mcPathsEff, bust / mcPathsEff, array.percentile_nearest_rank(dds, 50), array.percentile_nearest_rank(dds, 95), array.percentile_nearest_rank(strk, 95)]
+
+// ══════════════════════════════════════════════════════════════════════════
+// SEQUENCE STATE MACHINE   sq: 0 seek · 1 B-phase (retracing 0→A) · 2 activated (→C) · 3 C reached
+// ══════════════════════════════════════════════════════════════════════════
+var int   sq = 0
+var int   sd = 0
+var float s0 = na
+var float sA = na
+var float sB = na
+var float sH = na
+var float sC1 = na
+var float sC2 = na
+var int   sb0 = na
+var int   sbA = na
+var int   sbB = na
+var int   sbH = na
+var int   sbAct = na
+var int   seqId = 0
+var bool  seqWcl = false
+var float cL0 = na
+var float cLA = na
+var int   cLb = na
+var int   cLAb = na
+var float cH0 = na
+var float cHA = na
+var int   cHb = na
+var int   cHAb = na
+string evSeq = ""
+
+bool seeded = false
+if barstate.isconfirmed
+    bool canSeed = sq == 0 or subOn
+    if true
+        // 5/6: candidate Point 0 at an absolute extreme, Point A = running sub-extreme after it
+        if allowL and not na(pl) and pl <= llZ
+            cL0 := pl
+            cLb := bar_index - pivLen
+            cLA := hhP
+            cLAb := bar_index + hhPb
+        if allowS and not na(ph) and ph >= hhZ
+            cH0 := ph
+            cHb := bar_index - pivLen
+            cHA := llP
+            cHAb := bar_index + llPb
+        if not na(cL0)
+            if low < cL0
+                cL0 := na
+            else
+                float lgL = cLA - cL0
+                if canSeed and lgL >= minLeg * atr and low <= cLA - confLvl * lgL and not (sq > 0 and sd == 1 and cL0 == s0)
+                    string kindL = sq == 0 ? "CONFIRMED" : "SUBSEQ"
+                    // 10: correction exceeded 0.382 → Point 0 and A confirmed
+                    sq := 1
+                    sd := 1
+                    s0 := cL0
+                    sA := cLA
+                    sB := low
+                    sb0 := cLb
+                    sbA := cLAb
+                    sbB := bar_index
+                    seqId += 1
+                    seqWcl := false
+                    seeded := true
+                    evSeq := kindL
+                else if high > cLA
+                    cLA := high
+                    cLAb := bar_index
+        if not seeded and not na(cH0)
+            if high > cH0
+                cH0 := na
+            else
+                float lgS = cH0 - cHA
+                if canSeed and lgS >= minLeg * atr and high >= cHA + confLvl * lgS and not (sq > 0 and sd == -1 and cH0 == s0)
+                    string kindS = sq == 0 ? "CONFIRMED" : "SUBSEQ"
+                    sq := 1
+                    sd := -1
+                    s0 := cH0
+                    sA := cHA
+                    sB := high
+                    sb0 := cHb
+                    sbA := cHAb
+                    sbB := bar_index
+                    seqId += 1
+                    seqWcl := false
+                    seeded := true
+                    evSeq := kindS
+                else if low < cHA
+                    cHA := low
+                    cHAb := bar_index
+        if seeded
+            cL0 := na
+            cH0 := na
+if barstate.isconfirmed and not seeded
+    if sq == 0
+        na
+    else if sq == 1
+        bool inv0 = sd == 1 ? (invClose ? close < s0 : low < s0) : (invClose ? close > s0 : high > s0)
+        if inv0
+            sq := 0                                   // 15/16: beyond Point 0 → sequence invalid
+            evSeq := "INVALID"
+        else if sd == 1 ? high > sA : low < sA
+            sq := 2                                   // A broken → sequence activated, B fixed
+            sbAct := bar_index
+            sH := sd == 1 ? high : low
+            sbH := bar_index
+            sC1 := sB + c1Lvl * (sA - sB)
+            sC2 := sB + c2Lvl * (sA - sB)
+            evSeq := "ACTIVATED"
+            if sd == 1 ? sH >= sC1 : sH <= sC1
+                sq := 3
+                evSeq := "TARGET"
+        else if sd == 1 ? low < sB : high > sB
+            sB := sd == 1 ? low : high
+            sbB := bar_index
+    else if sq == 2
+        if sd == 1 ? high >= sC1 : low <= sC1
+            sq := 3                                   // 30: target C reached
+            sH := sd == 1 ? high : low
+            sbH := bar_index
+            evSeq := "TARGET"
+        else
+            if sd == 1 ? high > sH : low < sH
+                sH := sd == 1 ? high : low
+                sbH := bar_index
+            bool beyondB = sd == 1 ? close < sB : close > sB
+            if beyondB
+                bool inside0 = sd == 1 ? close > s0 : close < s0
+                if inside0
+                    sA := sH                          // 28/29: Point 0/C becomes Point 0/A
+                    sbA := sbH
+                    sB := sd == 1 ? low : high
+                    sbB := bar_index
+                    sq := 1
+                    seqId += 1
+                    seqWcl := false
+                    evSeq := "RESEED"
+                else
+                    sq := 0
+                    evSeq := "INVALID"
+    else if sq == 3
+        if sd == 1 ? high > sH : low < sH
+            sH := sd == 1 ? high : low                // 38: C can extend
+            sbH := bar_index
+        float lg3 = sH - s0
+        if sd == 1 ? low <= sH - confLvl * lg3 : high >= sH - confLvl * lg3
+            sA := sH                                  // 35/39: 0→C retraced > 0.382 → new 0/A
+            sbA := sbH
+            sB := sd == 1 ? low : high
+            sbB := bar_index
+            sq := 1
+            seqId += 1
+            seqWcl := true
+            evSeq := "WCL"
+
+// ══════════════════════════════════════════════════════════════════════════
+// TRADE LEDGER
+// ══════════════════════════════════════════════════════════════════════════
+type Trk
+    int   st        = 0
+    int   side      = 0
+    float entry     = na
+    float stop      = na
+    float tp        = na
+    float risk      = na
+    int   key       = -1
+    int   seq       = -1
+    int   armBar    = na
+    bool  beDone    = false
+    int   wins      = 0
+    int   losses    = 0
+    int   bes       = 0
+    int   missed    = 0
+    int   cancelled = 0
+    float sumR      = 0.0
+    float grossW    = 0.0
+    float grossL    = 0.0
+    int   streak    = 0
+    int   maxStreak = 0
+    int   dayLoss   = 0
+    float lastR     = na
+    int   oN        = 0
+    int   oW        = 0
+    float oR        = 0.0
+    bool  isRaw     = false
+    int   sess      = 0
+    int   dow       = 1
+    array<float> feat = na
+    array<float> amP  = na
+    float pF0       = na
+    float pW0       = na
+    bool  tr0       = false
+
+var Trk tRaw = Trk.new(isRaw = true)
+var Trk tB   = Trk.new()
+var Trk tBC  = Trk.new()
+var Trk tCT  = Trk.new()
+var Trk tWCL = Trk.new()
+
+f_stop(float lvl, int side) =>
+    float base = lvl - side * bufAtr * atr
+    float s = base
+    if roundOn and stepR > 0
+        float rn = side == 1 ? math.floor(lvl / stepR) * stepR : math.ceil(lvl / stepR) * stepR
+        if math.abs(lvl - rn) <= (bufAtr + roundZn) * atr
+            float s2 = rn - side * 0.15 * atr
+            s := side == 1 ? math.min(base, s2) : math.max(base, s2)
+    s
+
+f_tp(int side, float e, float s, float refA, bool ct) =>
+    float rk = math.abs(e - s)
+    ct or tpMode == "Fixed R:R" ? e + side * rr * rk : tpMode == "SK C target (161.8)" ? e + c1Lvl * (refA - e) : refA
+
+f_close(Trk t, int oc) =>
+    float r = oc == 1 ? (math.abs(t.tp - t.entry) - cost) / t.risk : oc == 0 ? -cost / t.risk : -(t.risk + cost) / t.risk
+    t.sumR := t.sumR + r
+    t.lastR := r
+    if oc == 1
+        t.wins := t.wins + 1
+        t.grossW := t.grossW + r
+        t.streak := 0
+    else if oc == 0
+        t.bes := t.bes + 1
+        t.grossL := t.grossL - r
+    else
+        t.losses := t.losses + 1
+        t.grossL := t.grossL - r
+        t.streak := t.streak + 1
+        t.maxStreak := math.max(t.maxStreak, t.streak)
+        t.dayLoss := t.dayLoss + 1
+    if time >= timenow - oosDays * 86400000
+        t.oN := t.oN + 1
+        t.oW := t.oW + (oc == 1 ? 1 : 0)
+        t.oR := t.oR + r
+    array.push(t.isRaw ? mcRR : mcRF, r)
+    if array.size(mcRR) > 2000
+        array.shift(mcRR)
+    if array.size(mcRF) > 2000
+        array.shift(mcRF)
+    t.st := 0
+    r
+
+// Conservative fills: entry+stop in one bar = loss; target checked from the bar after fill;
+// stop and target in one bar = stop.
+f_manage(Trk t, bool valid, bool missedNow) =>
+    string ev = ""
+    if t.st == 2
+        bool hitS = t.side == 1 ? low <= t.stop : high >= t.stop
+        bool hitT = t.side == 1 ? high >= t.tp : low <= t.tp
+        if hitS
+            int oc = t.beDone ? 0 : -1
+            f_close(t, oc)
+            ev := oc == 0 ? "BE" : "LOSS"
+        else if hitT
+            f_close(t, 1)
+            ev := "WIN"
+        else if beOn and not t.beDone and (t.side == 1 ? high >= t.entry + t.risk : low <= t.entry - t.risk)
+            t.stop := t.entry
+            t.beDone := true
+    else if t.st == 1
+        bool touched = t.side == 1 ? low <= t.entry : high >= t.entry
+        if touched
+            t.st := 2
+            t.beDone := false
+            ev := "FILL"
+            if t.side == 1 ? low <= t.stop : high >= t.stop
+                f_close(t, -1)
+                ev := "FILL+LOSS"
+        else if missedNow
+            t.missed := t.missed + 1
+            t.st := 0
+            ev := "MISSED"
+        else if not valid
+            t.cancelled := t.cancelled + 1
+            t.st := 0
+            ev := "CANCEL"
+    ev
+
+f_arm(Trk t, int side, float e, float s, float refA, bool ct, int key, int seq, bool allow) =>
+    string ev = ""
+    if t.st == 0 and allow and (key != t.key or seq != t.seq) and not na(e) and not na(s)
+        float en = (side == 1 and close <= e) or (side == -1 and close >= e) ? close : e
+        float tp = f_tp(side, en, s, refA, ct)
+        float rk = math.abs(en - s)
+        bool geomOk = side == 1 ? (s < en and tp > en) : (s > en and tp < en)
+        if rk > 0 and geomOk
+            t.st := 1
+            t.side := side
+            t.entry := en
+            t.stop := s
+            t.tp := tp
+            t.risk := rk
+            t.key := key
+            t.seq := seq
+            t.armBar := bar_index
+            ev := "ARM"
+    ev
+
+f_filt(int side, float rk, bool ct, Trk t) =>
+    bool okH = not htfOn or ct or htfBias == side
+    bool okV = not vrOn or ct or (not na(VR) and VR >= vrMin)
+    bool okC = not na(rk) and rk >= minRC * cost
+    float ed = eieSrc
+    bool okE = not eieAgree or (ed == 0 or ed == side)
+    bool okD = maxLossD == 0 or (tB.dayLoss + tBC.dayLoss + tCT.dayLoss + tWCL.dayLoss) < maxLossD
+    bool okN = not newsBlk
+    bool okM = not macFilt or ct or macBias == side
+    not applyF or (okH and okV and okTime and okC and okD and okE and okN and okM)
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// ADAPTIVE LEARNER — walks forward through every loaded candle ("prequential"):
+// each setup is PREDICTED when it arms, and the model is TRAINED only after the
+// outcome is known (fill / miss, then win / loss) → no lookahead, it keeps learning
+// live. Two models: P(fill) = does the 1→2 retracement reach the entry, and
+// P(win | fill). Trains on RAW (every setup) so the sample is unbiased.
+// Logistic regression by default; a small neural net (9→6→1, tanh) is optional.
+// Skill = 1 − Brier / Brier(base rate): > 0 means the model beats just knowing the win rate.
+// ══════════════════════════════════════════════════════════════════════════
+GRP_PXL = "⑤ Adaptive learner"
+pxMlOn   = input.bool(true, "Use learner as a gate", group = GRP_PXL)
+pxMlType = input.string("Logistic", "Model", options = ["Logistic", "Neural net (9-6-1)"], group = GRP_PXL,
+     tooltip = "Logistic is robust with few samples. The neural net needs several hundred setups (use 5m/15m or long 1m history) or it overfits — compare their Skill in the table.")
+pxMlMin  = input.int(30, "Min resolved trades before gating", minval = 10, group = GRP_PXL)
+pxEvMin  = input.float(0.05, "Min expected value per setup (R)", step = 0.05, group = GRP_PXL)
+pxLr     = input.float(0.10, "Learning rate", minval = 0.001, step = 0.01, group = GRP_PXL)
+pxL2     = input.float(0.01, "L2 regularisation", minval = 0, step = 0.005, group = GRP_PXL)
+
+PX_K = 14    // bias + 13 features (9 structure/regime + yields corr, macro bias, session edge, weekday edge)
+PX_H = 6
+var array<float> pxMu  = array.new<float>(PX_K, 0.0)
+var array<float> pxM2  = array.new<float>(PX_K, 0.0)
+var int          pxSn  = 0
+var array<float> pxWF  = array.new<float>(PX_K, 0.0)            // logistic: fill
+var array<float> pxWW  = array.new<float>(PX_K, 0.0)            // logistic: win
+var array<float> pxNF1 = array.new<float>(PX_H * PX_K, 0.0)     // net: fill hidden
+var array<float> pxNF2 = array.new<float>(PX_H + 1, 0.0)
+var array<float> pxNW1 = array.new<float>(PX_H * PX_K, 0.0)     // net: win hidden
+var array<float> pxNW2 = array.new<float>(PX_H + 1, 0.0)
+var int   pxNFill = 0
+var int   pxNWin  = 0
+var int   pxWinsSeen = 0
+var float pxBrier  = 0.0
+var float pxBrierB = 0.0
+var int   pxBrierN = 0
+if barstate.isfirst
+    for i = 0 to PX_H * PX_K - 1
+        float r = math.sin((i + 1) * 12.9898) * 43758.5453
+        array.set(pxNF1, i, (r - math.floor(r) - 0.5) * 0.6)
+        float r2 = math.sin((i + 7) * 78.233) * 43758.5453
+        array.set(pxNW1, i, (r2 - math.floor(r2) - 0.5) * 0.6)
+
+f_pxSig(float z) => 1.0 / (1.0 + math.exp(-math.max(-30.0, math.min(30.0, z))))
+f_pxTanh(float a) =>
+    float e = math.exp(2.0 * math.max(-15.0, math.min(15.0, a)))
+    (e - 1.0) / (e + 1.0)
+
+f_pxStd(array<float> raw) =>
+    array<float> x = array.new<float>(PX_K, 1.0)
+    for i = 1 to PX_K - 1
+        float v = array.get(raw, i)
+        float mu = array.get(pxMu, i)
+        float sdv = pxSn > 5 ? math.sqrt(array.get(pxM2, i) / (pxSn - 1)) : 1.0
+        float z = na(v) ? 0.0 : (v - mu) / (sdv > 1e-9 ? sdv : 1.0)
+        array.set(x, i, math.max(-4.0, math.min(4.0, z)))
+    x
+
+f_pxWelford(array<float> raw) =>
+    for i = 1 to PX_K - 1
+        float v = array.get(raw, i)
+        if not na(v)
+            float mu = array.get(pxMu, i)
+            float d = v - mu
+            float mu2 = mu + d / (pxSn + 1)
+            array.set(pxMu, i, mu2)
+            array.set(pxM2, i, array.get(pxM2, i) + d * (v - mu2))
+
+f_pxLgPred(array<float> w, array<float> x) =>
+    float z = 0.0
+    for i = 0 to PX_K - 1
+        z += array.get(w, i) * array.get(x, i)
+    f_pxSig(z)
+
+f_pxLgTrain(array<float> w, array<float> x, float y, float lr) =>
+    float g = y - f_pxLgPred(w, x)
+    for i = 0 to PX_K - 1
+        float wi = array.get(w, i)
+        array.set(w, i, wi + lr * (g * array.get(x, i) - (i == 0 ? 0.0 : pxL2 * wi)))
+    g
+
+f_pxNnPred(array<float> w1, array<float> w2, array<float> x) =>
+    float z = array.get(w2, PX_H)
+    for j = 0 to PX_H - 1
+        float a = 0.0
+        for i = 0 to PX_K - 1
+            a += array.get(w1, j * PX_K + i) * array.get(x, i)
+        z += array.get(w2, j) * f_pxTanh(a)
+    f_pxSig(z)
+
+f_pxNnTrain(array<float> w1, array<float> w2, array<float> x, float y, float lr) =>
+    array<float> hs = array.new<float>(PX_H, 0.0)
+    float z = array.get(w2, PX_H)
+    for j = 0 to PX_H - 1
+        float a = 0.0
+        for i = 0 to PX_K - 1
+            a += array.get(w1, j * PX_K + i) * array.get(x, i)
+        float h = f_pxTanh(a)
+        array.set(hs, j, h)
+        z += array.get(w2, j) * h
+    float g = y - f_pxSig(z)
+    for j = 0 to PX_H - 1
+        float v = array.get(w2, j)
+        float h = array.get(hs, j)
+        float gh = g * v * (1.0 - h * h)
+        array.set(w2, j, v + lr * (g * h - pxL2 * v))
+        for i = 0 to PX_K - 1
+            float w = array.get(w1, j * PX_K + i)
+            array.set(w1, j * PX_K + i, w + lr * (gh * array.get(x, i) - pxL2 * w))
+    array.set(w2, PX_H, array.get(w2, PX_H) + lr * g)
+    g
+
+f_pxPredFill(array<float> x) => pxMlType == "Logistic" ? f_pxLgPred(pxWF, x) : f_pxNnPred(pxNF1, pxNF2, x)
+f_pxPredWin(array<float> x)  => pxMlType == "Logistic" ? f_pxLgPred(pxWW, x) : f_pxNnPred(pxNW1, pxNW2, x)
+f_pxTrainFill(array<float> x, float y) =>
+    float lr = pxLr / math.sqrt(1.0 + pxNFill / 50.0)
+    f_pxLgTrain(pxWF, x, y, lr)
+    f_pxNnTrain(pxNF1, pxNF2, x, y, lr)
+f_pxTrainWin(array<float> x, float y) =>
+    float lr = pxLr / math.sqrt(1.0 + pxNWin / 50.0)
+    f_pxLgTrain(pxWW, x, y, lr)
+    f_pxNnTrain(pxNW1, pxNW2, x, y, lr)
+
+// Efficiency ratio of leg 0→A (bounded by max_bars_back)
+f_skEr() =>
+    int off = bar_index - sbA
+    int n = math.min(math.max(sbA - sb0, 1), 300)
+    n := math.min(n, 480 - off)
+    float er = na
+    if n >= 1 and off >= 0
+        float path = 0.0
+        for i = 0 to n - 1
+            path += math.abs(close[off + i] - close[off + i + 1])
+        er := path > 0 ? math.abs(close[off] - close[off + n]) / path : 0.0
+    er
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// AUTO-ML — self-monitoring, self-retraining ensemble for P(win | setup)
+//  • 6 online models trained walk-forward on every SK setup (RAW): 4 logistic
+//    regressions with different learning rate / L2, and 2 small neural nets (9→6→1)
+//  • Hedge / exponential weighting: each model's vote decays with its recent Brier loss
+//  • Rolling skill = 1 − Brier(ensemble) / Brier(base win rate), EWMA over the last N trades
+//  • Below the retrain threshold: losing models are re-initialised, their hyper-parameters
+//    mutated (population-based training) and retrained on a replay buffer of recent trades
+//  • The ensemble only filters trades while rolling skill > the gate threshold
+// ══════════════════════════════════════════════════════════════════════════
+GRP_AM = "⑥ Auto-ML (self-retraining)"
+amOn       = input.bool(true, "Self-retraining ensemble", group = GRP_AM,
+     tooltip = "Replaces the single learner: 4 logistic models + 2 neural nets, weighted by recent accuracy, retrained automatically when rolling skill falls.")
+amGate     = input.float(0.05, "Filter trades only while rolling skill >", step = 0.01, group = GRP_AM)
+amRetrainB = input.float(0.0, "Retrain when rolling skill <", step = 0.01, group = GRP_AM)
+amCool     = input.int(20, "Min trades between retrains", minval = 5, group = GRP_AM)
+amEpochs   = input.int(1, "Replay epochs per retrain", minval = 1, maxval = 3, group = GRP_AM)
+amBufN     = input.int(100, "Replay buffer (trades)", minval = 30, maxval = 200, group = GRP_AM)
+amHalf     = input.int(30, "Skill window (trades, EWMA)", minval = 10, group = GRP_AM)
+
+AM_NL = 4
+AM_NN = 2
+AM_M  = AM_NL + AM_NN
+var array<float> amLr   = array.from(0.02, 0.06, 0.15, 0.4, 0.05, 0.15)
+var array<float> amL2   = array.from(0.001, 0.01, 0.01, 0.05, 0.005, 0.005)
+var array<float> amW    = array.new<float>(AM_NL * PX_K, 0.0)
+var array<float> amN1   = array.new<float>(AM_NN * PX_H * PX_K, 0.0)
+var array<float> amN2   = array.new<float>(AM_NN * (PX_H + 1), 0.0)
+var array<float> amBr   = array.new<float>(AM_M, 0.25)
+var array<float> amBufX = array.new<float>()
+var array<float> amBufY = array.new<float>()
+var int   amN        = 0
+var int   amWins     = 0
+var float amEnsBr    = 0.25
+var float amBaseBr   = 0.25
+var int   amRetrains = 0
+var int   amLastRt   = 0
+
+f_amRand(int k) =>
+    float r = math.sin(k * 12.9898 + 78.233) * 43758.5453
+    r - math.floor(r) - 0.5
+
+f_amInitNn(int j, int seed) =>
+    for i = 0 to PX_H * PX_K - 1
+        array.set(amN1, j * PX_H * PX_K + i, f_amRand(seed * 1000 + j * 97 + i) * 0.6)
+    for i = 0 to PX_H
+        array.set(amN2, j * (PX_H + 1) + i, 0.0)
+    true
+
+if barstate.isfirst
+    for j = 0 to AM_NN - 1
+        f_amInitNn(j, 1)
+
+f_amLgP(int m, array<float> x) =>
+    float z = 0.0
+    for i = 0 to PX_K - 1
+        z += array.get(amW, m * PX_K + i) * array.get(x, i)
+    f_pxSig(z)
+
+f_amLgT(int m, array<float> x, float y, float lr, float l2) =>
+    float g = y - f_amLgP(m, x)
+    for i = 0 to PX_K - 1
+        int k = m * PX_K + i
+        float w = array.get(amW, k)
+        array.set(amW, k, w + lr * (g * array.get(x, i) - (i == 0 ? 0.0 : l2 * w)))
+    g
+
+f_amNnP(int j, array<float> x) =>
+    int o1 = j * PX_H * PX_K
+    int o2 = j * (PX_H + 1)
+    float z = array.get(amN2, o2 + PX_H)
+    for h = 0 to PX_H - 1
+        float a = 0.0
+        for i = 0 to PX_K - 1
+            a += array.get(amN1, o1 + h * PX_K + i) * array.get(x, i)
+        z += array.get(amN2, o2 + h) * f_pxTanh(a)
+    f_pxSig(z)
+
+f_amNnT(int j, array<float> x, float y, float lr, float l2) =>
+    int o1 = j * PX_H * PX_K
+    int o2 = j * (PX_H + 1)
+    array<float> hs = array.new<float>(PX_H, 0.0)
+    float z = array.get(amN2, o2 + PX_H)
+    for h = 0 to PX_H - 1
+        float a = 0.0
+        for i = 0 to PX_K - 1
+            a += array.get(amN1, o1 + h * PX_K + i) * array.get(x, i)
+        float th = f_pxTanh(a)
+        array.set(hs, h, th)
+        z += array.get(amN2, o2 + h) * th
+    float g = y - f_pxSig(z)
+    for h = 0 to PX_H - 1
+        float v = array.get(amN2, o2 + h)
+        float th = array.get(hs, h)
+        float gh = g * v * (1.0 - th * th)
+        array.set(amN2, o2 + h, v + lr * (g * th - l2 * v))
+        for i = 0 to PX_K - 1
+            int k = o1 + h * PX_K + i
+            float w = array.get(amN1, k)
+            array.set(amN1, k, w + lr * (gh * array.get(x, i) - l2 * w))
+    array.set(amN2, o2 + PX_H, array.get(amN2, o2 + PX_H) + lr * g)
+    g
+
+f_amP(int m, array<float> x) => m < AM_NL ? f_amLgP(m, x) : f_amNnP(m - AM_NL, x)
+
+f_amT(int m, array<float> x, float y, float decay) =>
+    float lr = array.get(amLr, m) * decay
+    m < AM_NL ? f_amLgT(m, x, y, lr, array.get(amL2, m)) : f_amNnT(m - AM_NL, x, y, lr, array.get(amL2, m))
+
+f_amPredAll(array<float> x) =>
+    array<float> p = array.new<float>(AM_M, 0.5)
+    for m = 0 to AM_M - 1
+        array.set(p, m, f_amP(m, x))
+    p
+
+// Hedge / exponential weights on each model's rolling Brier loss
+f_amEns(array<float> p) =>
+    float best = array.min(amBr)
+    float sw = 0.0
+    float sp = 0.0
+    for m = 0 to AM_M - 1
+        float w = math.exp(-40.0 * (array.get(amBr, m) - best))
+        sw += w
+        sp += w * array.get(p, m)
+    sw > 0 ? sp / sw : 0.5
+
+// Population-based retraining: every model no better than the base rate is reset,
+// gets mutated hyper-parameters, and is retrained on the replay buffer.
+f_amRetrain(float baseBr, int cycle) =>
+    int n = array.size(amBufY)
+    int touched = 0
+    for m = 0 to AM_M - 1
+        if array.get(amBr, m) >= baseBr
+            touched += 1
+            float f = (cycle + m) % 2 == 0 ? 0.5 : 2.0
+            array.set(amLr, m, math.max(0.005, math.min(1.0, array.get(amLr, m) * f)))
+            array.set(amL2, m, math.max(0.0005, math.min(0.2, array.get(amL2, m) * ((cycle + m) % 3 == 0 ? 2.0 : 0.7))))
+            if m < AM_NL
+                for i = 0 to PX_K - 1
+                    array.set(amW, m * PX_K + i, 0.0)
+            else
+                f_amInitNn(m - AM_NL, cycle + 2)
+            array.set(amBr, m, baseBr)
+            if n > 0
+                for e = 1 to amEpochs
+                    int t0 = m < AM_NL ? 0 : math.max(0, n - 50)   // work cap for the neural nets
+                    for t = t0 to n - 1
+                        f_amT(m, array.slice(amBufX, t * PX_K, (t + 1) * PX_K), array.get(amBufY, t), 1.0)
+    touched
+
+f_amName(int m) => (m < AM_NL ? "LR" : "NN") + " lr " + str.tostring(array.get(amLr, m), "#.###")
+
+// ── setups from the current sequence ──────────────────────────────────────
+float L0A    = sA - s0
+float bEntry = sA - entryLvl * L0A
+float bStop  = slMode == "Beyond point 0 / B" ? f_stop(s0, sd) : f_stop(sA - invLvl * L0A, sd)
+float LBH    = sH - sB
+float bcEntry = sH - entryLvl * LBH
+float bcStop  = slMode == "Beyond point 0 / B" ? f_stop(sB, sd) : f_stop(sH - invLvl * LBH, sd)
+bool  bcReady = sq == 2 and not na(LBH) and (sd == 1 ? low <= sH - confLvl * LBH : high >= sH - confLvl * LBH)
+float ctEntry = sB + ctLvl * (sA - sB)
+float ctStop  = f_stop(sC2, -sd)
+
+// ── learner features for the current B / WCL setup and live predictions ──
+float skEr = na
+if barstate.isconfirmed and sq == 1 and not na(sb0) and not na(sbA)
+    skEr := f_skEr()
+float bRisk = math.abs(bEntry - bStop)
+array<float> pxXraw = array.from(1.0, atr > 0 ? math.abs(L0A) / atr : na, skEr, VR, float(htfBias * sd), hrAct, atrPct / 100.0,
+     na(sbA) or na(sb0) ? na : math.log(1.0 + math.max(sbA - sb0, 1)), seqWcl ? 1.0 : 0.0, atr > 0 ? bRisk / atr : na,
+     corrGY, float(macBias * sd), sessEdge, dowEdge)
+float pxPF = na
+float pxPW = na
+float pxEV = na
+float amSkill     = amN >= 10 and amBaseBr > 0 ? 1.0 - amEnsBr / amBaseBr : na     // rolling (EWMA) skill of the ensemble
+bool  pxSkillBad  = amOn ? (not na(amSkill) and amSkill <= 0) : (pxBrierN >= 10 and pxBrierB > 0 and pxBrier >= pxBrierB)
+bool  pxMlTrained = amOn ? (amN >= pxMlMin and not na(amSkill) and amSkill > amGate) : (pxNWin >= pxMlMin and not pxSkillBad)
+array<float> amPredsNow = array.new<float>(AM_M, 0.5)
+if sq == 1 and sd != 0 and not na(bRisk)
+    array<float> xs = f_pxStd(pxXraw)
+    pxPF := f_pxPredFill(xs)
+    pxPW := f_pxPredWin(xs)
+    if amOn
+        amPredsNow := f_amPredAll(xs)
+        pxPW := f_amEns(amPredsNow)
+    float rk = math.max(bRisk, syminfo.mintick)
+    float rew = tpMode == "Fixed R:R" ? rr : tpMode == "SK C target (161.8)" ? c1Lvl * math.abs(sA - bEntry) / rk : math.abs(sA - bEntry) / rk
+    pxEV := pxPF * (pxPW * (rew - cost / rk) - (1.0 - pxPW) * (1.0 + cost / rk))
+bool pxGate = not pxMlOn or not pxMlTrained or (not na(pxEV) and pxEV >= pxEvMin)
+
+string evRaw = ""
+string evB   = ""
+string evBC  = ""
+string evCT  = ""
+string evW   = ""
+if barstate.isconfirmed
+    if timeframe.change("1D")
+        tRaw.dayLoss := 0
+        tB.dayLoss := 0
+        tBC.dayLoss := 0
+        tCT.dayLoss := 0
+        tWCL.dayLoss := 0
+    evRaw := f_manage(tRaw, sq == 1 and seqId == tRaw.seq, sq >= 2 and seqId == tRaw.seq)
+    evB   := f_manage(tB, sq == 1 and seqId == tB.seq, sq >= 2 and seqId == tB.seq)
+    evW   := f_manage(tWCL, sq == 1 and seqId == tWCL.seq, sq >= 2 and seqId == tWCL.seq)
+    evBC  := f_manage(tBC, sq == 2 and seqId == tBC.seq and sbH == tBC.key, seqId == tBC.seq and (sq == 3 or (sq == 2 and sbH != tBC.key)))
+    evCT  := f_manage(tCT, sq == 3 and seqId == tCT.seq, false)
+    // RAW = every B/WCL setup, unfiltered — also the learner's training source
+    if sq == 1 and takeB
+        string a1 = f_arm(tRaw, sd, bEntry, bStop, sA, false, seqId, seqId, true)
+        evRaw := a1 != "" ? a1 : evRaw
+        if seqWcl
+            string a5 = f_arm(tWCL, sd, bEntry, bStop, sA, false, seqId, seqId, f_filt(sd, bRisk, false, tWCL) and pxGate)
+            evW := a5 != "" ? a5 : evW
+        else
+            string a2 = f_arm(tB, sd, bEntry, bStop, sA, false, seqId, seqId, f_filt(sd, bRisk, false, tB) and pxGate)
+            evB := a2 != "" ? a2 : evB
+    if bcReady and takeBC
+        string a3 = f_arm(tBC, sd, bcEntry, bcStop, sH, false, sbH, seqId, f_filt(sd, math.abs(bcEntry - bcStop), false, tBC))
+        evBC := a3 != "" ? a3 : evBC
+    if sq == 3 and takeCT
+        string a4 = f_arm(tCT, -sd, ctEntry, ctStop, sA, true, seqId, seqId, f_filt(-sd, math.abs(ctEntry - ctStop), true, tCT))
+        evCT := a4 != "" ? a4 : evCT
+    if evRaw == "ARM"
+        tRaw.feat := array.copy(pxXraw)
+        f_pxWelford(pxXraw)
+        pxSn += 1
+        tRaw.pF0 := pxPF
+        tRaw.pW0 := pxPW
+        tRaw.amP := array.copy(amPredsNow)
+        tRaw.sess := sessId
+        tRaw.dow := nyDow
+        tRaw.tr0 := pxMlTrained
+    else if not na(tRaw.feat)
+        array<float> xs = f_pxStd(tRaw.feat)
+        if evRaw == "FILL" or evRaw == "FILL+LOSS"
+            f_pxTrainFill(xs, 1.0)
+            pxNFill += 1
+        else if evRaw == "MISSED" or evRaw == "CANCEL"
+            f_pxTrainFill(xs, 0.0)
+            pxNFill += 1
+        if evRaw == "WIN" or evRaw == "LOSS" or evRaw == "FILL+LOSS"
+            float y = evRaw == "WIN" ? 1.0 : 0.0
+            array.set(sesN, tRaw.sess, array.get(sesN, tRaw.sess) + 1)
+            array.set(sesW, tRaw.sess, array.get(sesW, tRaw.sess) + y)
+            array.set(dowN, tRaw.dow - 1, array.get(dowN, tRaw.dow - 1) + 1)
+            array.set(dowW, tRaw.dow - 1, array.get(dowW, tRaw.dow - 1) + y)
+            calN += 1
+            calW += y
+            if tRaw.tr0 and not na(tRaw.pW0)
+                float base = pxNWin > 0 ? pxWinsSeen * 1.0 / pxNWin : 0.5
+                pxBrier += math.pow(tRaw.pW0 - y, 2)
+                pxBrierB += math.pow(base - y, 2)
+                pxBrierN += 1
+            f_pxTrainWin(xs, y)
+            pxNWin += 1
+            pxWinsSeen += evRaw == "WIN" ? 1 : 0
+            if amOn and not na(tRaw.amP)
+                float aw = 2.0 / (amHalf + 1)
+                float pb = (amWins + 1.0) / (amN + 2.0)
+                for m = 0 to AM_M - 1
+                    array.set(amBr, m, array.get(amBr, m) + aw * (math.pow(array.get(tRaw.amP, m) - y, 2) - array.get(amBr, m)))
+                amEnsBr += aw * (math.pow(tRaw.pW0 - y, 2) - amEnsBr)
+                amBaseBr += aw * (math.pow(pb - y, 2) - amBaseBr)
+                float dec = 1.0 / math.sqrt(1.0 + amN / 50.0)
+                for m = 0 to AM_M - 1
+                    f_amT(m, xs, y, dec)
+                array.concat(amBufX, xs)
+                array.push(amBufY, y)
+                while array.size(amBufY) > amBufN
+                    array.shift(amBufY)
+                    for i = 0 to PX_K - 1
+                        array.shift(amBufX)
+                amN += 1
+                amWins += y > 0.5 ? 1 : 0
+                float skNow = amN >= 10 and amBaseBr > 0 ? 1.0 - amEnsBr / amBaseBr : na
+                if amN >= pxMlMin and not na(skNow) and skNow < amRetrainB and amN - amLastRt >= amCool
+                    f_amRetrain(amBaseBr, amRetrains)
+                    amRetrains += 1
+                    amLastRt := amN
+                    amEnsBr := amBaseBr
+
+// ══════════════════════════════════════════════════════════════════════════
+// DRAWING
+// ══════════════════════════════════════════════════════════════════════════
+var label lb0 = na
+var label lbA = na
+var label lbB = na
+var label lbC = na
+var box   bxE = na
+var box   bxC = na
+var line  ln0 = na
+color cBull = color.new(#2962ff, 0)
+color cBear = color.new(#9c27b0, 0)
+
+f_lb(label l, int x, float y, string t, bool top, color c) =>
+    label r = l
+    if na(r)
+        r := label.new(x, y, t, style = top ? label.style_label_down : label.style_label_up, color = c, textcolor = color.white, size = size.small)
+    else
+        label.set_xy(r, x, y)
+        label.set_text(r, t)
+        label.set_style(r, top ? label.style_label_down : label.style_label_up)
+        label.set_color(r, c)
+    r
+
+f_bx(box b, int x1, float y1, int x2, float y2, color c, string t) =>
+    box r = b
+    float tp = math.max(y1, y2)
+    float bt = math.min(y1, y2)
+    if na(r)
+        r := box.new(x1, tp, x2, bt, border_color = c, bgcolor = color.new(c, 85), text = t, text_color = c, text_size = size.tiny, text_halign = text.align_right)
+    else
+        box.set_lefttop(r, x1, tp)
+        box.set_rightbottom(r, x2, bt)
+        box.set_text(r, t)
+        box.set_border_color(r, c)
+        box.set_bgcolor(r, color.new(c, 85))
+        box.set_text_color(r, c)
+    r
+
+if barstate.isconfirmed
+    if sq == 0
+        if evSeq == "INVALID" and showLbls
+            label.new(bar_index, close, "✖ SK", style = label.style_label_center, color = color.new(color.gray, 20), textcolor = color.white, size = size.tiny)
+        label.delete(lb0)
+        label.delete(lbA)
+        label.delete(lbB)
+        label.delete(lbC)
+        box.delete(bxE)
+        box.delete(bxC)
+        line.delete(ln0)
+        lb0 := na
+        lbA := na
+        lbB := na
+        lbC := na
+        bxE := na
+        bxC := na
+        ln0 := na
+    else
+        color cc = sd == 1 ? cBull : cBear
+        if showLbls
+            lb0 := f_lb(lb0, sb0, s0, "SK0", sd == -1, cc)
+            lbA := f_lb(lbA, sbA, sA, seqWcl ? "SKA (=C)" : "SKA", sd == 1, cc)
+            lbB := f_lb(lbB, sbB, sB, "SKB", sd == -1, cc)
+            if sq == 3
+                lbC := f_lb(lbC, sbH, sH, "SKC", sd == 1, color.new(color.teal, 0))
+            else if not na(lbC)
+                label.delete(lbC)
+                lbC := na
+        if showZones
+            if sq == 1
+                bxE := f_bx(bxE, sbA, sA - 0.5 * L0A, bar_index + 15, sA - 0.667 * L0A, seqWcl ? color.purple : color.orange, (seqWcl ? "SK WCL ENTRY" : "SK B ZONE") + " · " + (sd == 1 ? "BUY" : "SELL") + " limit at " + entryStr + " · SL " + (sd == 1 ? "below" : "above") + " SK0 " + str.tostring(s0, format.mintick))
+            else if sq == 2 and takeBC
+                bxE := f_bx(bxE, sbH, sH - 0.5 * LBH, bar_index + 15, sH - 0.667 * LBH, color.orange, "SK B→C ZONE · " + (sd == 1 ? "BUY" : "SELL") + " pullback limit at " + entryStr + " · SL " + (sd == 1 ? "below" : "above") + " SKB " + str.tostring(sB, format.mintick))
+            else if sq != 3 and not na(bxE)
+                box.delete(bxE)
+                bxE := na
+            if sq == 3
+                float L0C = sH - s0
+                bxE := f_bx(bxE, sbH, sH - 0.5 * L0C, bar_index + 15, sH - 0.667 * L0C, color.purple, "SK WCL WATCH · C reached · wait for a 0.382 pullback, then " + (sd == 1 ? "BUY" : "SELL") + " in this zone")
+            if sq >= 2
+                bxC := f_bx(bxC, sbAct, sC1, bar_index + 20, sC2, color.teal, "SK C TARGET 161.8–200% · TAKE PROFIT here · no new " + (sd == 1 ? "buys" : "sells"))
+            else if not na(bxC)
+                box.delete(bxC)
+                bxC := na
+            if na(ln0)
+                ln0 := line.new(sb0, s0, bar_index + 20, s0, color = color.new(color.red, 30), style = line.style_dashed)
+            else
+                line.set_xy1(ln0, sb0, s0)
+                line.set_xy2(ln0, bar_index + 20, s0)
+
+f_res(Trk t, string ev) =>
+    if showRes and (ev == "WIN" or ev == "LOSS" or ev == "FILL+LOSS" or ev == "BE")
+        bool w = ev == "WIN"
+        label.new(bar_index, t.side == 1 ? (w ? high : low) : (w ? low : high), (t.lastR >= 0 ? "+" : "") + str.tostring(t.lastR, "#.#") + "R",
+             style = (t.side == 1) == w ? label.style_label_down : label.style_label_up,
+             color = w ? color.new(color.green, 10) : ev == "BE" ? color.new(color.gray, 10) : color.new(color.red, 10), textcolor = color.white, size = size.tiny)
+f_res(tB, evB)
+f_res(tBC, evBC)
+f_res(tCT, evCT)
+f_res(tWCL, evW)
+
+// ── alerts ────────────────────────────────────────────────────────────────
+f_msg(string kind, Trk t, string ev) =>
+    string m = "SK " + syminfo.ticker + " " + timeframe.period + " · " + kind + " " + ev + " " + (t.side == 1 ? "LONG" : "SHORT")
+    if ev == "ARM"
+        m += " · limit " + str.tostring(t.entry, format.mintick) + " · SL " + str.tostring(t.stop, format.mintick) + " · TP " + str.tostring(t.tp, format.mintick) +
+             " · R:R " + str.tostring(math.abs(t.tp - t.entry) / t.risk, "#.##")
+    else if ev == "WIN" or ev == "LOSS" or ev == "FILL+LOSS" or ev == "BE"
+        m += " · " + str.tostring(t.lastR, "#.##") + "R net"
+    m
+if evSeq != ""
+    alert("SK " + syminfo.ticker + " " + timeframe.period + " · sequence " + evSeq + " (" + (sd == 1 ? "bull" : sd == -1 ? "bear" : "-") + ") 0=" + str.tostring(s0, format.mintick) +
+         " A=" + str.tostring(sA, format.mintick) + (sq >= 2 ? " C=" + str.tostring(sC1, format.mintick) + "–" + str.tostring(sC2, format.mintick) : ""), alert.freq_once_per_bar_close)
+if evB != ""
+    alert(f_msg("B", tB, evB), alert.freq_once_per_bar_close)
+if evBC != ""
+    alert(f_msg("BC", tBC, evBC), alert.freq_once_per_bar_close)
+if evW != ""
+    alert(f_msg("WCL", tWCL, evW), alert.freq_once_per_bar_close)
+if evCT != ""
+    alert(f_msg("CT", tCT, evCT), alert.freq_once_per_bar_close)
+alertcondition(evSeq == "WCL", "SK WCL phase entered", "SK {{ticker}}: 0→C retraced past 0.382, WCL entries active")
+alertcondition(evSeq == "CONFIRMED" or evSeq == "RESEED" or evSeq == "SUBSEQ", "SK sequence confirmed", "SK {{ticker}}: Point 0 and A confirmed (0.382 exceeded)")
+alertcondition(evSeq == "ACTIVATED", "SK sequence activated", "SK {{ticker}}: Point A broken, sequence activated")
+alertcondition(evSeq == "TARGET", "SK target C reached", "SK {{ticker}}: C target zone reached")
+alertcondition(evSeq == "INVALID", "SK sequence invalid", "SK {{ticker}}: sequence invalid")
+alertcondition(evB == "ARM" or evBC == "ARM" or evCT == "ARM" or evW == "ARM", "SK entry armed", "SK {{ticker}}: entry armed (levels in the alert() message)")
+alertcondition(evB == "CANCEL" or evB == "MISSED" or evBC == "CANCEL" or evBC == "MISSED" or evCT == "CANCEL", "SK cancel order", "SK {{ticker}}: cancel pending limit")
+
+// ── performance table ─────────────────────────────────────────────────────
+f_n(Trk t) => t.wins + t.losses + t.bes
+f_wr(Trk t) => f_n(t) > 0 ? str.tostring(100.0 * t.wins / f_n(t), "#.0") + "%" : "—"
+f_avg(Trk t) => f_n(t) > 0 ? str.tostring(t.sumR / f_n(t), "+#.00;-#.00") + "R" : "—"
+f_pf(Trk t) => t.grossL > 0 ? str.tostring(t.grossW / t.grossL, "#.00") : f_n(t) > 0 ? "∞" : "—"
+f_oos(Trk t) => t.oN > 0 ? str.tostring(t.oN) + "·" + str.tostring(100.0 * t.oW / t.oN, "#") + "%·" + str.tostring(t.oR / t.oN, "+#.00;-#.00") : "—"
+f_st(Trk t) => t.st == 1 ? "pending" : t.st == 2 ? (t.beDone ? "in trade (BE)" : "in trade") : "flat"
+string phase = sq == 0 ? "seeking 0/A" : sq == 1 ? "B phase" : sq == 2 ? "activated → C" : "C reached"
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// SUPERTREND AI (built in, lightweight) — performance-clustered factor (idea: LuxAlgo,
+// CC BY-NC-SA 4.0) + volatility-regime ATR (idea: AlgoAlpha, MPL 2.0). Independent implementation.
+// Lightweight for TradingView's free-plan time limit:
+//  • updates only on closed candles (never on live ticks; also means no repainting)
+//  • volatility regime from fixed percentiles (low ≈ p17, medium = median, high ≈ p83 of recent ATR)
+//    refreshed every 5 closed candles — same three levels a 1-D k-means converges to, at a tiny cost
+//  • factor chosen by k-means over the factors' performance every 5 closed candles (5 factors: cheap)
+//  • votes only while its strength is above its own 100-candle average
+// Defaults 21 / 89 / 3.0–5.0 were the best tested settings.
+// ══════════════════════════════════════════════════════════════════════════
+G9 = "⑨ SuperTrend AI (built in)"
+stOn      = input.bool(true, "SuperTrend AI (6th Super Signal vote)", group = G9)
+stShow    = input.bool(true, "Show trailing stop and flip labels", group = G9)
+stAtrLen  = input.int(21, "ATR length", minval = 1, group = G9)
+stFMin    = input.float(3.0, "Factor range (from / to / step)", minval = 0.1, step = 0.1, group = G9, inline = "stf")
+stFMax    = input.float(5.0, "", minval = 0.2, step = 0.1, group = G9, inline = "stf")
+stFStep   = input.float(0.5, "", minval = 0.1, step = 0.1, group = G9, inline = "stf")
+stMem     = input.float(89, "Performance memory (bars)", minval = 2, group = G9)
+stVolOn   = input.bool(true, "Volatility-regime ATR", group = G9)
+stVolTr   = input.int(89, "Volatility window (bars)", minval = 20, maxval = 300, group = G9)
+stRefitN  = input.int(1, "Refit every N closed candles", minval = 1, maxval = 21, group = G9,
+     tooltip = "1 = best (89 paired tests: no measurable loss vs the full model). Raise to 5 only if TradingView shows a time-limit error.")
+
+float stAtrRaw = ta.atr(stAtrLen)
+float stDen    = ta.ema(math.abs(close - close[1]), int(stMem))
+int   ST_NF    = int(math.floor((stFMax - stFMin) / stFStep)) + 1
+var array<float> stVolBuf = array.new<float>()
+var array<float> stFac = array.new<float>()
+var array<float> stUp  = array.new<float>()
+var array<float> stDn  = array.new<float>()
+var array<int>   stTr  = array.new<int>()
+var array<float> stOut = array.new<float>()
+var array<float> stPer = array.new<float>()
+var float stQ0 = na
+var float stQ1 = na
+var float stQ2 = na
+var int   stVolLvl = 1
+var float stFactor = (stFMin + stFMax) / 2
+var float stPBest = 0.0
+var float stStrength = 0.0
+var float stStrAvg = na
+var float stUB = na
+var float stLB = na
+var int   stOs = 0
+var int   stDir = 0
+var int   stLastFlip = na
+var float stTrail = na
+int stFlip = 0
+if barstate.isfirst
+    for i = 0 to ST_NF - 1
+        array.push(stFac, stFMin + i * stFStep)
+        array.push(stUp, hl2)
+        array.push(stDn, hl2)
+        array.push(stTr, 0)
+        array.push(stOut, hl2)
+        array.push(stPer, 0.0)
+
+if stOn and barstate.isconfirmed and not na(stAtrRaw)
+    bool refit = bar_index % stRefitN == 0
+    // volatility regime
+    array.push(stVolBuf, stAtrRaw)
+    if array.size(stVolBuf) > stVolTr
+        array.shift(stVolBuf)
+    if stVolOn and array.size(stVolBuf) >= 20 and (refit or na(stQ0))
+        stQ0 := array.percentile_nearest_rank(stVolBuf, 17)
+        stQ1 := array.percentile_nearest_rank(stVolBuf, 50)
+        stQ2 := array.percentile_nearest_rank(stVolBuf, 83)
+    float atrU = stAtrRaw
+    if stVolOn and not na(stQ0)
+        float g0 = math.abs(stAtrRaw - stQ0)
+        float g1 = math.abs(stAtrRaw - stQ1)
+        float g2 = math.abs(stAtrRaw - stQ2)
+        stVolLvl := g0 <= g1 and g0 <= g2 ? 0 : g1 <= g2 ? 1 : 2
+        atrU := stVolLvl == 0 ? stQ0 : stVolLvl == 1 ? stQ1 : stQ2
+    // one SuperTrend per factor, each with an EWMA performance score
+    float al = 2.0 / (stMem + 1)
+    for i = 0 to ST_NF - 1
+        float f = array.get(stFac, i)
+        float up = hl2 + atrU * f
+        float dn = hl2 - atrU * f
+        float pu = array.get(stUp, i)
+        float pd = array.get(stDn, i)
+        int tr = close > pu ? 1 : close < pd ? 0 : array.get(stTr, i)
+        array.set(stTr, i, tr)
+        array.set(stUp, i, close[1] < pu ? math.min(up, pu) : up)
+        array.set(stDn, i, close[1] > pd ? math.max(dn, pd) : dn)
+        float dr = nz(math.sign(close[1] - array.get(stOut, i)))
+        float pf = array.get(stPer, i)
+        array.set(stPer, i, pf + al * (nz(close - close[1]) * dr - pf))
+        array.set(stOut, i, tr == 1 ? array.get(stDn, i) : array.get(stUp, i))
+    // k-means (k = 3) over the factors' performance → mean factor of the best cluster
+    if refit
+        float c0 = array.min(stPer)
+        float c2 = array.max(stPer)
+        float c1 = (c0 + c2) / 2
+        array<int> lab = array.new<int>(ST_NF, 1)
+        for it = 0 to 9
+            float a0 = 0.0
+            float a1 = 0.0
+            float a2 = 0.0
+            int b0 = 0
+            int b1 = 0
+            int b2 = 0
+            for i = 0 to ST_NF - 1
+                float v = array.get(stPer, i)
+                float d0 = math.abs(v - c0)
+                float d1 = math.abs(v - c1)
+                float d2 = math.abs(v - c2)
+                int l = d0 <= d1 and d0 <= d2 ? 0 : d1 <= d2 ? 1 : 2
+                array.set(lab, i, l)
+                if l == 0
+                    a0 += v
+                    b0 += 1
+                else if l == 1
+                    a1 += v
+                    b1 += 1
+                else
+                    a2 += v
+                    b2 += 1
+            float n0 = b0 > 0 ? a0 / b0 : c0
+            float n1 = b1 > 0 ? a1 / b1 : c1
+            float n2 = b2 > 0 ? a2 / b2 : c2
+            bool done = n0 == c0 and n1 == c1 and n2 == c2
+            c0 := n0
+            c1 := n1
+            c2 := n2
+            if done
+                break
+        float best = math.max(c0, math.max(c1, c2))
+        int bl = best == c0 ? 0 : best == c1 ? 1 : 2
+        float fs = 0.0
+        float ps = 0.0
+        int fc = 0
+        for i = 0 to ST_NF - 1
+            if array.get(lab, i) == bl
+                fs += array.get(stFac, i)
+                ps += array.get(stPer, i)
+                fc += 1
+        if fc > 0
+            stFactor := fs / fc
+            stPBest := ps / fc
+    stStrength := stDen > 0 ? math.max(stPBest, 0) / stDen : 0.0
+    stStrAvg := na(stStrAvg) ? stStrength : stStrAvg + (stStrength - stStrAvg) * 2.0 / 101.0
+    // adaptive trailing stop with the chosen factor
+    float u = hl2 + atrU * stFactor
+    float d = hl2 - atrU * stFactor
+    stUB := na(stUB) ? u : close[1] < stUB ? math.min(u, stUB) : u
+    stLB := na(stLB) ? d : close[1] > stLB ? math.max(d, stLB) : d
+    stOs := close > stUB ? 1 : close < stLB ? 0 : stOs
+    stTrail := stOs == 1 ? stLB : stUB
+    int nd = stOs == 1 ? 1 : -1
+    if nd != stDir
+        stFlip := stDir == 0 ? 0 : nd
+        stDir := nd
+        stLastFlip := bar_index
+int   stVote = stOn and not na(stStrAvg) and stStrength >= stStrAvg ? stDir : 0
+plot(stOn and stShow ? stTrail : na, "SuperTrend AI trailing stop", color = stDir == 1 ? color.new(#26a69a, 0) : color.new(#ef5350, 0), linewidth = 2, style = plot.style_linebr)
+if stOn and stShow and stFlip != 0
+    label.new(bar_index, stFlip == 1 ? low : high, (stFlip == 1 ? "ST ▲ BUY bias · trail stop " : "ST ▼ SELL bias · trail stop ") + str.tostring(stTrail, format.mintick),
+         style = stFlip == 1 ? label.style_label_up : label.style_label_down, color = stFlip == 1 ? color.new(#26a69a, 0) : color.new(#ef5350, 0), textcolor = color.white, size = size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════
+// SUPER SIGNAL — one combined action from independent inputs
+// Votes (+1 up / −1 down / 0): SK structure · EIE direction · HTF trend · macro (yields + dollar) ·
+// regime (variance ratio ≥ min confirms the SK direction). Downgrades: negative session edge,
+// learner expected value < 0 once it is gating. Blocks: news blackout, EIE × SK conflict.
+// ══════════════════════════════════════════════════════════════════════════
+int   vSK   = sq == 1 or sq == 2 ? sd : 0
+int   vEIE  = eieSrc == 1 or eieSrc == -1 ? int(eieSrc) : 0
+int   vHTF  = htfBias
+int   vMAC  = macBias
+int   vREG  = not na(VR) and VR >= vrMin and sq > 0 ? sd : 0
+bool  stSet = stOn                                                          // SuperTrend AI is built in
+int   vST   = stVote
+int   nVotes = stSet ? 6 : 5
+int   supSum = vSK + vEIE + vHTF + vMAC + vREG + vST
+int   supDir = supSum > 0 ? 1 : supSum < 0 ? -1 : 0
+int   supAgree = (vSK == supDir ? 1 : 0) + (vEIE == supDir ? 1 : 0) + (vHTF == supDir ? 1 : 0) + (vMAC == supDir ? 1 : 0) + (vREG == supDir ? 1 : 0) + (stSet and vST == supDir ? 1 : 0)
+bool  supConflict = vSK != 0 and vEIE != 0 and vSK != vEIE
+int   supLevel = supDir == 0 ? 0 : supAgree >= nVotes - 1 ? 2 : supAgree >= nVotes - 2 ? 1 : 0
+if supLevel > 0 and calN >= 20 and sessEdge < -0.05
+    supLevel -= 1
+if supLevel > 0 and pxMlTrained and not na(pxEV) and pxEV < 0
+    supLevel -= 1
+string supTxt = newsBlk ? "STAND DOWN · " + newsWhy + " news" : supConflict ? "WAIT · EIE × SK conflict" :
+     supLevel == 2 ? (supDir == 1 ? "STRONG BUY" : "STRONG SELL") : supLevel == 1 ? (supDir == 1 ? "BUY bias" : "SELL bias") : "WAIT · no clear edge"
+string supWhy = str.tostring(supAgree) + "/" + str.tostring(nVotes) + " agree · SK " + (vSK == 1 ? "▲" : vSK == -1 ? "▼" : "–") + " EIE " + (vEIE == 1 ? "▲" : vEIE == -1 ? "▼" : "–") +
+     " HTF " + (vHTF == 1 ? "▲" : vHTF == -1 ? "▼" : "–") + " MACRO " + (vMAC == 1 ? "▲" : vMAC == -1 ? "▼" : "–") + " REGIME " + (vREG == 1 ? "▲" : vREG == -1 ? "▼" : "–") + (stSet ? " ST " + (vST == 1 ? "▲" : vST == -1 ? "▼" : "–") : "")
+color supCol = newsBlk or supConflict ? color.orange : supLevel == 0 ? color.gray : supDir == 1 ? color.new(#089981, 0) : color.new(#f23645, 0)
+string supAct = supLevel == 0 or newsBlk or supConflict ? "no new trades" : "take only the SK / EIE limit orders in the " + (supDir == 1 ? "BUY" : "SELL") + " direction"
+var label supLbl = na
+if showPanel and barstate.islast
+    string t = "SUPER SIGNAL: " + supTxt + "\n" + supWhy + "\n→ " + supAct
+    if na(supLbl)
+        supLbl := label.new(bar_index + 3, close, t, style = label.style_label_left, color = supCol, textcolor = color.white, size = size.small)
+    else
+        label.set_xy(supLbl, bar_index + 3, close)
+        label.set_text(supLbl, t)
+        label.set_color(supLbl, supCol)
+
+// ── compact panel (default) ───────────────────────────────────────────────
+f_pos(string p) => p == "Top right" ? position.top_right : p == "Bottom right" ? position.bottom_right : p == "Bottom left" ? position.bottom_left : position.top_left
+// feed the incremental Monte Carlo on closed bars
+if mcOn and barstate.isconfirmed and (bar_index >= last_bar_index - 30 or barstate.isrealtime)   // only recent bars: 400 paths need ~16 bars
+    array<float> mcS = mcSrc == "RAW" ? mcRR : mcRF
+    if array.size(mcS) >= mcMinN
+        f_mcChunk(mcS, mcChunk)
+
+var table pan = table.new(f_pos(panelPos), 2, 16, bgcolor = color.new(#131722, 5), border_color = color.new(#5d606b, 50), border_width = 1, frame_color = color.new(#5d606b, 50), frame_width = 1)
+f_kv(int r, string k, string v, color c) =>
+    table.cell(pan, 0, r, k, text_color = color.new(#787b86, 0), text_size = size.small, text_halign = text.align_left)
+    table.cell(pan, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_left)
+f_sig(Trk t, string nm) => t.st == 0 ? "" : nm + " " + (t.side == 1 ? "LONG " : "SHORT ") + (t.st == 1 ? "limit placed" : t.beDone ? "in trade (BE)" : "in trade")
+f_lvl(Trk t) => t.st == 0 ? "" : str.tostring(t.entry, format.mintick) + " · " + str.tostring(t.stop, format.mintick) + " · " + str.tostring(t.tp, format.mintick)
+f_sum(Trk t) => f_n(t) > 0 ? str.tostring(f_n(t)) + " · " + f_wr(t) + " · " + f_avg(t) : "no trades yet"
+if showPanel and barstate.islast
+    color tx = color.new(#d1d4dc, 0)
+    string sig = f_sig(tB, "B")
+    string lv = f_lvl(tB)
+    if sig == ""
+        sig := f_sig(tWCL, "WCL")
+        lv := f_lvl(tWCL)
+    if sig == ""
+        sig := f_sig(tBC, "B→C")
+        lv := f_lvl(tBC)
+    if sig == ""
+        sig := f_sig(tCT, "Counter")
+        lv := f_lvl(tCT)
+    if sig == ""
+        sig := sq == 1 ? (pxGate ? "watching entry zone" : "skip (learner EV low)") : sq == 2 ? "activated → C" : sq == 3 ? "C reached · WCL watch" : "scanning for 0 / A"
+    int   nF = f_n(tB) + f_n(tBC) + f_n(tWCL) + f_n(tCT)
+    int   wF = tB.wins + tBC.wins + tWCL.wins + tCT.wins
+    float rF = tB.sumR + tBC.sumR + tWCL.sumR + tCT.sumR
+    string skill = pxBrierN >= 10 and pxBrierB > 0 ? str.tostring(1.0 - pxBrier / pxBrierB, "+0.00;-0.00") : "—"
+    color dc = sd == 1 ? color.new(#089981, 0) : color.new(#f23645, 0)
+    f_kv(0, "◆ SK SEQ", syminfo.ticker + " · " + timeframe.period, tx)
+    f_kv(14, "SUPER SIGNAL", supTxt + " · " + supWhy, supCol)
+    if stOn
+        f_kv(15, "SuperTrend AI", (stDir == 1 ? "▲ UP" : stDir == -1 ? "▼ DOWN" : "—") + " · trail " + str.tostring(stTrail, format.mintick) + " · factor " + str.tostring(stFactor, "#.0")
+             + " · vol " + (stVolLvl == 0 ? "low" : stVolLvl == 1 ? "med" : "high") + " · strength " + str.tostring(stStrength, "#.00") + (stVote != 0 ? " · votes" : " · no vote (below its average strength)"),
+             stDir == 1 ? color.new(#26a69a, 0) : stDir == -1 ? color.new(#ef5350, 0) : tx)
+    f_kv(1, "Sequence", phase + (sq > 0 ? (sd == 1 ? " · bull" : " · bear") + (seqWcl and sq == 1 ? " · WCL" : "") : ""), sq > 0 ? dc : tx)
+    f_kv(2, "0 · A", sq > 0 ? str.tostring(s0, format.mintick) + " · " + str.tostring(sA, format.mintick) : "—", tx)
+    f_kv(3, "B · C", sq > 0 ? str.tostring(sB, format.mintick) + " · " + (sq >= 2 ? str.tostring(sC1, format.mintick) + "–" + str.tostring(sC2, format.mintick) : "—") : "—", tx)
+    f_kv(4, "Signal", sig, lv != "" ? color.new(color.yellow, 0) : tx)
+    f_kv(5, "Entry · SL · TP", lv == "" ? "—" : lv, tx)
+    f_kv(6, "P(fill) · P(win) · EV", na(pxPF) ? "—" : str.tostring(100 * pxPF, "#") + "% · " + str.tostring(100 * pxPW, "#") + "% · " + str.tostring(pxEV, "+0.00;-0.00") + "R", tx)
+    string eTxt = not eieAgree ? "off" : eieSrc == 1 ? "▲" : eieSrc == -1 ? "▼" : eieSrc == 0 ? "–" : "⚠ set source"
+    bool conflict = sq > 0 and (eieSrc == 1 or eieSrc == -1) and eieSrc != sd
+    f_kv(7, "Filters", "HTF " + (htfBias == 1 ? "▲" : htfBias == -1 ? "▼" : "–") + " · VR " + (na(VR) ? "—" : str.tostring(VR, "#.00")) + " · time " + (okTime ? "✓" : "✗") + " · EIE " + eTxt + (conflict ? " ⚠ CONFLICT" : ""), conflict ? color.new(color.orange, 0) : tx)
+    f_kv(8, "Results (filtered)", nF > 0 ? str.tostring(nF) + " · " + str.tostring(100.0 * wF / nF, "#") + "% · " + str.tostring(rF / nF, "+#.00;-#.00") + "R" : "no trades yet", tx)
+    f_kv(9, "Results (RAW)", f_sum(tRaw), color.new(#9598a1, 0))
+    if amOn
+        int champ = array.indexof(amBr, array.min(amBr))
+        f_kv(10, "Auto-ML", str.tostring(amN) + "/" + str.tostring(pxMlMin) + (pxMlTrained ? " · gating" : pxSkillBad ? " · off (skill ≤ 0)" : " · learning")
+             + " · skill " + (na(amSkill) ? "—" : str.tostring(amSkill, "+0.00;-0.00")) + " · best " + f_amName(champ) + " · retrains " + str.tostring(amRetrains), tx)
+    else
+        f_kv(10, "Learner", str.tostring(pxNWin) + "/" + str.tostring(pxMlMin) + (pxMlTrained ? " · gating" : pxSkillBad ? " · off (skill ≤ 0)" : " · learning") + " · skill " + skill, tx)
+    f_kv(11, "Macro", "10Y corr " + (na(corrGY) ? "—" : str.tostring(corrGY, "+0.00;-0.00")) + " · DXY corr " + (na(corrGD) ? "—" : str.tostring(corrGD, "+0.00;-0.00"))
+         + " · bias " + (macBias == 1 ? "▲" : macBias == -1 ? "▼" : "–") + (newsBlk ? " · ⛔ " + newsWhy + " blackout" : " · news ✓"), newsBlk ? color.new(color.orange, 0) : tx)
+    f_kv(12, "Session", f_sessName(sessId) + " edge " + str.tostring(100 * sessEdge, "+0;-0") + "% · " + f_dowName(nyDow) + " edge " + str.tostring(100 * dowEdge, "+0;-0") + "% (n=" + str.tostring(calN, "#") + ")", tx)
+    if mcOn
+        array<float> src = mcSrc == "RAW" ? mcRR : mcRF
+        int np = array.size(mcOutA)
+        if array.size(src) >= mcMinN and np >= 50
+            float mp = 0.0
+            float mb = 0.0
+            for v in mcOutA
+                mp += v > 0 ? 1 : 0
+                mb += v < 0 ? 1 : 0
+            mp /= np
+            mb /= np
+            float d50 = array.percentile_nearest_rank(mcDDA, 50)
+            float d95 = array.percentile_nearest_rank(mcDDA, 95)
+            float s95 = array.percentile_nearest_rank(mcSTA, 95)
+            f_kv(13, "Monte Carlo (" + str.tostring(array.size(src)) + " trades · " + str.tostring(np) + " paths)", "pass " + str.tostring(100 * mp, "#") + "% · breach " + str.tostring(100 * mb, "#") + "% · DD " + str.tostring(d50, "#.0") + "/" + str.tostring(d95, "#.0") + "% (50/95) · streak95 " + str.tostring(s95, "#"),
+                 mb > 0.2 ? color.new(color.red, 0) : mp > 0.5 ? color.new(#089981, 0) : tx)
+        else
+            f_kv(13, "Monte Carlo", array.size(src) < mcMinN ? "needs " + str.tostring(mcMinN) + " trades (" + str.tostring(array.size(src)) + " so far)" : "simulating… " + str.tostring(np) + " paths", tx)
+
+var table tbl = table.new(position.bottom_right, 6, 14, bgcolor = color.new(#131722, 10), border_color = color.new(#5d606b, 40), border_width = 1, frame_color = color.new(#5d606b, 40), frame_width = 1)
+f_row(int r, string name, string a, string b, string c, string d, string e) =>
+    color tx = color.new(#d1d4dc, 0)
+    color mu = color.new(#787b86, 0)
+    table.cell(tbl, 0, r, name, text_color = mu, text_size = size.small)
+    table.cell(tbl, 1, r, a, text_color = mu, text_size = size.small)
+    table.cell(tbl, 2, r, b, text_color = tx, text_size = size.small)
+    table.cell(tbl, 3, r, c, text_color = tx, text_size = size.small)
+    table.cell(tbl, 4, r, d, text_color = tx, text_size = size.small)
+    table.cell(tbl, 5, r, e, text_color = tx, text_size = size.small)
+f_wlb(Trk t) => str.tostring(t.wins) + "/" + str.tostring(t.losses) + "/" + str.tostring(t.bes)
+f_mc(Trk t) => str.tostring(t.missed) + "/" + str.tostring(t.cancelled)
+if showStats and barstate.islast
+    string skill = pxBrierN >= 10 and pxBrierB > 0 ? str.tostring(1.0 - pxBrier / pxBrierB, "+0.00;-0.00") : "—"
+    f_row(0, "◆ SK SEQ v2", "RAW B+WCL", "B", "B→C", "WCL", "Counter")
+    f_row(1, "Trades (W/L/BE)", f_wlb(tRaw), f_wlb(tB), f_wlb(tBC), f_wlb(tWCL), f_wlb(tCT))
+    f_row(2, "Win rate", f_wr(tRaw), f_wr(tB), f_wr(tBC), f_wr(tWCL), f_wr(tCT))
+    f_row(3, "Avg R (net)", f_avg(tRaw), f_avg(tB), f_avg(tBC), f_avg(tWCL), f_avg(tCT))
+    f_row(4, "Profit factor", f_pf(tRaw), f_pf(tB), f_pf(tBC), f_pf(tWCL), f_pf(tCT))
+    f_row(5, "Max loss streak", str.tostring(tRaw.maxStreak), str.tostring(tB.maxStreak), str.tostring(tBC.maxStreak), str.tostring(tWCL.maxStreak), str.tostring(tCT.maxStreak))
+    f_row(6, "Missed / cancelled", f_mc(tRaw), f_mc(tB), f_mc(tBC), f_mc(tWCL), f_mc(tCT))
+    f_row(7, "OOS " + str.tostring(oosDays) + "d n·WR·R", f_oos(tRaw), f_oos(tB), f_oos(tBC), f_oos(tWCL), f_oos(tCT))
+    f_row(8, "Status", f_st(tRaw), f_st(tB), f_st(tBC), f_st(tWCL), f_st(tCT))
+    f_row(9, "Sequence", phase + (sq > 0 ? (sd == 1 ? " · bull" : " · bear") + (seqWcl and sq == 1 ? " · WCL" : "") : ""), "0 " + (na(s0) ? "—" : str.tostring(s0, format.mintick)),
+         "A " + (na(sA) ? "—" : str.tostring(sA, format.mintick)), "B " + (na(sB) ? "—" : str.tostring(sB, format.mintick)), sq >= 2 ? "C " + str.tostring(sC1, format.mintick) : "C —")
+    f_row(10, "Learner (" + (pxMlType == "Logistic" ? "logit" : "net") + ")", "fills " + str.tostring(pxNFill), "trades " + str.tostring(pxNWin) + "/" + str.tostring(pxMlMin), "skill " + skill, pxMlTrained ? "gating" : pxSkillBad ? "off (skill ≤ 0)" : "learning", "")
+    f_row(11, "Now P(fill)·P(win)·EV", na(pxPF) ? "—" : str.tostring(100 * pxPF, "#") + "%", na(pxPW) ? "—" : str.tostring(100 * pxPW, "#") + "%", na(pxEV) ? "—" : str.tostring(pxEV, "+0.00;-0.00") + "R", "entry " + entryStr, "")
+    f_row(12, "Filters", "HTF " + (htfBias == 1 ? "▲" : htfBias == -1 ? "▼" : "–"), "VR " + (na(VR) ? "—" : str.tostring(VR, "#.00")), "hour " + (na(hrAct) ? "—" : str.tostring(hrAct, "#.00")), okTime ? "time ✓" : "time ✗", "")
+    f_row(13, "Bars learned", str.tostring(bar_index + 1), "", "", "", "")

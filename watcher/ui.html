@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operation Aurum</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #040706; --panel: #07100c; --panel2: #0a1611; --line: #123524; --line2: #1b4d34;
+    --fg: #b8f5cf; --dim: #5f8f74; --mute: #33584a;
+    --green: #39ff88; --amber: #ffb000; --red: #ff3b5c; --cyan: #3ad1ff; --violet: #b38cff;
+    --glow: 0 0 6px rgba(57,255,136,.55), 0 0 18px rgba(57,255,136,.18);
+    --mono: "JetBrains Mono", "Share Tech Mono", ui-monospace, Menlo, monospace;
+    --display: "Share Tech Mono", "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 13px; }
+  body::before {            /* scanlines */
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 50;
+    background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0, rgba(0,0,0,0) 2px, rgba(0,0,0,.18) 3px);
+  }
+  body::after {             /* vignette */
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 49;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.55) 100%);
+  }
+  .wrap { max-width: 1480px; margin: 0 auto; padding: 14px 16px 28px; }
+  .banner { text-align: center; font-family: var(--display); letter-spacing: .35em; font-size: 11px; color: #120; background: var(--amber);
+            padding: 3px 0; margin: -14px -16px 12px; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: baseline; justify-content: space-between; border-bottom: 1px solid var(--line2); padding-bottom: 10px; }
+  .title { font-family: var(--display); font-size: 22px; letter-spacing: .12em; color: var(--green); text-shadow: var(--glow); }
+  .title .cur { animation: blink 1s steps(1) infinite; }
+  .sub { color: var(--dim); font-size: 11px; letter-spacing: .2em; }
+  .status { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; color: var(--dim); }
+  .status b { color: var(--fg); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .dot.on { background: var(--green); box-shadow: var(--glow); animation: pulse 1.6s infinite; }
+  .dot.off { background: var(--red); }
+  .dot.demo { background: var(--amber); }
+  .price { font-size: 20px; font-weight: 700; color: var(--fg); transition: color .25s; }
+  .price.up { color: var(--green); } .price.dn { color: var(--red); }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; margin-top: 14px; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: linear-gradient(180deg, rgba(10,22,17,.66), rgba(7,16,12,.58)); border: 1px solid var(--line); position: relative; backdrop-filter: blur(1.5px); }
+  .card::before, .card::after { content: ""; position: absolute; width: 10px; height: 10px; border-color: var(--green); border-style: solid; opacity: .7; }
+  .card::before { top: -1px; left: -1px; border-width: 1px 0 0 1px; }
+  .card::after { bottom: -1px; right: -1px; border-width: 0 1px 1px 0; }
+  .card h2 { margin: 0; padding: 8px 12px; font-family: var(--display); font-weight: 400; font-size: 12px; letter-spacing: .25em; color: var(--dim);
+             border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 8px; }
+  .card h2 span:last-child { color: var(--mute); }
+  .trackcard { display: flex; flex-direction: column; }
+  .chartbox { flex: 1; min-height: 470px; }
+  @media (max-width: 700px) { .chartbox { min-height: 340px; } }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--dim); }
+  .legend i { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: 3px; }
+  .kv { width: 100%; border-collapse: collapse; }
+  .kv td { padding: 5px 12px; border-bottom: 1px dashed var(--line); vertical-align: top; }
+  .kv td:first-child { color: var(--dim); width: 44%; white-space: nowrap; }
+  .kv td:last-child { color: var(--fg); word-break: break-word; }
+  .side { display: flex; flex-direction: column; gap: 14px; }
+  .op { padding: 12px; }
+  .op .state { font-family: var(--display); font-size: 18px; letter-spacing: .08em; }
+  .op .state.long { color: var(--green); text-shadow: var(--glow); }
+  .op .state.short { color: var(--red); text-shadow: 0 0 8px rgba(255,59,92,.5); }
+  .op .state.idle { color: var(--dim); }
+  .lv { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+  .lv div { border: 1px solid var(--line); padding: 6px 8px; }
+  .lv small { display: block; color: var(--dim); font-size: 10px; letter-spacing: .2em; }
+  .lv b { font-size: 15px; }
+  .calc { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .calc label { color: var(--dim); font-size: 10px; letter-spacing: .15em; display: block; margin-bottom: 3px; }
+  .calc input { width: 100%; background: #020403; border: 1px solid var(--line2); color: var(--green); font-family: var(--mono); font-size: 14px; padding: 5px 7px; outline: none; }
+  .calc input:focus { border-color: var(--green); box-shadow: var(--glow); }
+  .out { margin-top: 10px; padding: 8px; border: 1px dashed var(--line2); color: var(--fg); }
+  .out b { color: var(--amber); font-size: 16px; }
+  .log { max-height: 300px; overflow: auto; padding: 6px 0; font-size: 12px; }
+  .log div { padding: 3px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; animation: type .5s steps(30) both; }
+  .log time { color: var(--mute); margin-right: 10px; }
+  .tag { display: inline-block; min-width: 128px; margin-right: 10px; }
+  .t-place { color: var(--amber); } .t-fill { color: var(--cyan); } .t-cancel { color: var(--red); } .t-close { color: var(--green); }
+  .t-move { color: var(--violet); } .t-warn { color: var(--red); } .t-info { color: var(--dim); }
+  .warn { margin-top: 10px; padding: 7px 9px; border: 1px solid var(--red); color: var(--red); background: rgba(255,59,92,.08); font-size: 12px; letter-spacing: .06em; animation: pulse 1.6s infinite; }
+  .warn.amber { border-color: var(--amber); color: var(--amber); background: rgba(255,176,0,.07); }
+  .warroom { position: relative; }
+  .wr-btn { background: transparent; border: 1px solid var(--line2); color: var(--green); font-family: var(--mono); font-size: 10px; letter-spacing: .15em; padding: 2px 8px; cursor: pointer; }
+  .wr-btn:focus-visible { outline: 1px solid var(--green); }
+  .blinkg { color: var(--green); font-weight: 400; animation: pulse 1.2s infinite; }
+  .wr-head { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 10px 12px 6px; }
+  .wr-head div { border-left: 2px solid var(--line2); padding-left: 8px; min-width: 0; }
+  .wr-head small, .wr-tile small, .wr-sub { display: block; color: var(--dim); font-size: 10px; letter-spacing: .2em; }
+  .wr-head b { display: block; color: var(--fg); font-size: 13px; overflow-wrap: anywhere; }
+  .wr-head span, .wr-tile span { display: block; color: var(--mute); font-size: 11px; }
+  .wr-prog { height: 3px; margin: 4px 12px 10px; background: var(--line); }
+  .wr-prog i { display: block; height: 100%; background: var(--green); box-shadow: var(--glow); transition: width .4s; }
+  .wr-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 0 12px 8px; }
+  .wr-tile { border: 1px solid var(--line); padding: 8px 10px; background: rgba(0,0,0,.25); }
+  .wr-tile b { font-size: 26px; font-family: var(--display); }
+  .wr-bar { height: 3px; background: var(--line); margin: 6px 0 4px; }
+  .wr-bar i { display: block; height: 100%; transition: width .5s; }
+  .wr-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 6px 12px; color: var(--dim); font-size: 11px; }
+  .wr-legend i { display: inline-block; width: 12px; height: 2px; margin-right: 6px; vertical-align: 3px; }
+  .wr-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 6px 12px 12px; }
+  .wrap, header, .grid, .bottom, footer { position: relative; z-index: 1; }
+  @media (max-width: 900px) { .wr-head, .wr-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .wr-grid { grid-template-columns: minmax(0, 1fr); } }
+  .bottom { margin-top: 14px; }
+  .sync { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 10px; font-size: 11px; position: relative; z-index: 1; }
+  .sync .pill { border: 1px solid var(--line2); padding: 3px 8px; background: rgba(0,0,0,.45); color: var(--dim); }
+  .sync .pill b { color: var(--fg); font-weight: 600; }
+  .sync .ok { color: var(--green); } .sync .warn { color: var(--amber); } .sync .bad { color: var(--red); }
+  .tele-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; padding: 10px 12px 12px; }
+  @media (max-width: 900px) { .tele-grid { grid-template-columns: minmax(0, 1fr); } }
+  .term { height: 260px; overflow: auto; background: rgba(0,0,0,.72); border: 1px solid var(--line); padding: 8px 10px; font-size: 11.5px; line-height: 1.55; }
+  .term div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #8fe8b3; animation: type .45s steps(28) both; }
+  .term .t-mc { color: var(--cyan); } .term .t-sync { color: var(--violet); } .term .t-draw { color: var(--amber); }
+  .term .cursor { display: inline-block; width: 8px; height: 13px; background: var(--green); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+  .cores { display: grid; gap: 6px; margin-bottom: 10px; }
+  .core { display: grid; grid-template-columns: 58px 1fr 52px; align-items: center; gap: 8px; font-size: 11px; color: var(--dim); }
+  .core .bar { height: 8px; background: var(--line); position: relative; overflow: hidden; }
+  .core .bar i { position: absolute; inset: 0; width: 0; background: var(--cyan); }
+  .core.busy .bar i { width: 100%; animation: corepulse .5s linear infinite; box-shadow: 0 0 8px var(--cyan); }
+  @keyframes corepulse { 0% { opacity: .35; } 50% { opacity: 1; } 100% { opacity: .35; } }
+  .tstat { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; font-size: 11px; }
+  .tstat small { display: block; color: var(--dim); letter-spacing: .15em; font-size: 9.5px; }
+  .tstat b { color: var(--fg); font-size: 13px; }
+  .empty { padding: 14px 12px; color: var(--mute); }
+  footer { margin-top: 18px; color: var(--mute); font-size: 11px; letter-spacing: .1em; text-align: center; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @keyframes type { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/vendor/react.js"></script>
+<script src="/vendor/react-dom.js"></script>
+<script src="/vendor/htm.js"></script>
+<script src="/vendor/lightweight-charts.js"></script>
+<script>
+const { useState, useEffect, useRef, useMemo } = React;
+const html = htm.bind(React.createElement);
+const C = { green: '#39ff88', red: '#ff3b5c', amber: '#ffb000', cyan: '#3ad1ff', violet: '#b38cff', dim: '#5f8f74', line: '#123524' };
+
+const nums = (s) => (String(s || '').match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+const fmt = (x, d = 2) => (x == null || Number.isNaN(x) ? '—' : Number(x).toFixed(d));
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+// Decrypt-style text reveal for headings
+function Decode({ text, speed = 28 }) {
+  const [out, setOut] = useState(text);
+  useEffect(() => {
+    const glyphs = '█▓▒░<>/\\|#%&$@01';
+    let i = 0;
+    const id = setInterval(() => {
+      i++;
+      setOut(text.split('').map((ch, k) => (k < i || ch === ' ' ? ch : glyphs[(k * 7 + i) % glyphs.length])).join(''));
+      if (i >= text.length) clearInterval(id);
+    }, speed);
+    return () => clearInterval(id);
+  }, [text]);
+  return out;
+}
+
+function Clock() {
+  const [t, setT] = useState(new Date());
+  useEffect(() => { const id = setInterval(() => setT(new Date()), 1000); return () => clearInterval(id); }, []);
+  const ny = t.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
+  const utc = t.toISOString().slice(11, 19);
+  return html`<span>NY <b>${ny}</b></span><span>UTC <b>${utc}</b></span>`;
+}
+
+// Parse levels the two panels publish
+function levelsFrom(panels) {
+  const eie = panels['EIE PRO'] || {}, sk = panels['SK SEQ'] || {};
+  const L = [];
+  const inv = nums(eie['Invalidation'])[0];
+  if (inv) L.push({ price: inv, color: C.red, title: 'EIE INVALID', style: 2 });
+  const [e1, s1, t1] = nums(eie['Entry · SL · TP']);
+  if (e1) L.push({ price: e1, color: C.amber, title: 'EIE ENTRY', style: 0 }, { price: s1, color: C.red, title: 'EIE SL', style: 0 }, { price: t1, color: C.green, title: 'EIE TP', style: 0 });
+  const [k0, kA] = nums(sk['0 · A']);
+  const [kB, kC1, kC2] = nums(sk['B · C']);
+  if (k0) L.push({ price: k0, color: C.violet, title: 'SK0', style: 1 });
+  if (kA) L.push({ price: kA, color: C.violet, title: 'SKA', style: 1 });
+  if (kB) L.push({ price: kB, color: C.violet, title: 'SKB', style: 1 });
+  if (kC1) L.push({ price: kC1, color: C.cyan, title: 'SKC', style: 3 });
+  if (kC2) L.push({ price: kC2, color: C.cyan, title: 'SKC 200%', style: 3 });
+  const [e2, s2, t2] = nums(sk['Entry · SL · TP']);
+  if (e2) L.push({ price: e2, color: C.amber, title: 'SK ENTRY', style: 0 }, { price: s2, color: C.red, title: 'SK SL', style: 0 }, { price: t2, color: C.green, title: 'SK TP', style: 0 });
+  return L.filter(l => Number.isFinite(l.price));
+}
+
+function Chart({ bars, levels, ov }) {
+  const box = useRef(null), chart = useRef(null), series = useRef(null), lines = useRef([]), zl = useRef([]), fitted = useRef(false);
+  useEffect(() => {
+    const ch = LightweightCharts.createChart(box.current, {
+      autoSize: true,
+      layout: { background: { color: 'transparent' }, textColor: C.dim, fontFamily: 'JetBrains Mono, monospace', fontSize: 11 },
+      grid: { vertLines: { color: 'rgba(18,53,36,.6)' }, horzLines: { color: 'rgba(18,53,36,.6)' } },
+      rightPriceScale: { borderColor: C.line }, timeScale: { borderColor: C.line, timeVisible: true, secondsVisible: false },
+      crosshair: { vertLine: { color: C.green, labelBackgroundColor: '#0b2a1b' }, horzLine: { color: C.green, labelBackgroundColor: '#0b2a1b' } },
+    });
+    series.current = ch.addCandlestickSeries({ upColor: C.green, downColor: C.red, borderUpColor: C.green, borderDownColor: C.red, wickUpColor: C.green, wickDownColor: C.red });
+    chart.current = ch;
+    return () => ch.remove();
+  }, []);
+  useEffect(() => {
+    if (!series.current || !bars?.length) return;
+    const data = bars.map(b => ({ time: b.time > 1e12 ? Math.floor(b.time / 1000) : b.time, open: b.open, high: b.high, low: b.low, close: b.close }))
+      .filter((b, i, a) => i === 0 || b.time > a[i - 1].time);
+    series.current.setData(data);
+    if (!fitted.current) { chart.current.timeScale().fitContent(); fitted.current = true; }
+  }, [bars]);
+  useEffect(() => {
+    if (!series.current) return;
+    lines.current.forEach(l => series.current.removePriceLine(l));
+    lines.current = levels.map(l => series.current.createPriceLine({ price: l.price, color: l.color, lineWidth: l.title.includes('ENTRY') ? 2 : 1, lineStyle: l.style, axisLabelVisible: true, title: l.title }));
+  }, [levels]);
+  useEffect(() => {
+    if (!series.current) return;
+    const s = series.current;
+    zl.current.forEach(l => s.removePriceLine(l)); zl.current = [];
+    if (!ov) { try { s.setMarkers([]); } catch {} return; }
+    const times = new Set((bars || []).map(b => (b.time > 1e12 ? Math.floor(b.time / 1000) : b.time)));
+    const mk = (ov.markers || []).filter(m => times.has(m.time)).map(m => ({ time: m.time, position: /^(0|2|4|A|C|SK0|SKB)/.test(m.text) && m.src === 'EIE' ? 'aboveBar' : 'belowBar',
+      color: m.src === 'SK' ? C.violet : m.text === 'CHoCH' ? C.amber : C.green, shape: m.src === 'SK' ? 'square' : 'circle', text: m.text }));
+    try { s.setMarkers(mk); } catch {}
+    (ov.zones || []).forEach((z) => {
+      const col = z.src === 'SK' ? C.violet : C.amber, t = z.text.length > 26 ? z.text.slice(0, 26) + '…' : z.text;
+      zl.current.push(s.createPriceLine({ price: z.top, color: col, lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: t }));
+      zl.current.push(s.createPriceLine({ price: z.bot, color: col, lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: '' }));
+    });
+    if (ov.trail) zl.current.push(s.createPriceLine({ price: ov.trail, color: C.cyan, lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'ST TRAIL' }));
+  }, [JSON.stringify(ov), bars && bars.length]);
+  return html`<div class="chartbox" ref=${box}></div>`;
+}
+
+function Dossier({ name, rows }) {
+  const keys = Object.keys(rows || {}).filter(k => !k.startsWith('◆'));
+  return html`<section class="card">
+    <h2><span>DOSSIER · ${name}</span><span>${keys.length ? 'LIVE' : 'NO SIGNAL'}</span></h2>
+    ${keys.length ? html`<table class="kv"><tbody>${keys.map(k => html`<tr key=${k}><td>${k}</td><td>${rows[k]}</td></tr>`)}</tbody></table>`
+                  : html`<div class="empty">Indicator not found on the active chart.</div>`}
+  </section>`;
+}
+
+function Operation({ panels, last }) {
+  const [risk, setRisk] = useState(store.get('aurum.risk', 25));
+  const [units, setUnits] = useState(store.get('aurum.units', 100));
+  useEffect(() => store.set('aurum.risk', risk), [risk]);
+  useEffect(() => store.set('aurum.units', units), [units]);
+  const pick = ['EIE PRO', 'SK SEQ'].map(n => ({ n, p: panels[n] || {} }))
+    .find(x => /limit|in trade/i.test(x.p['Signal'] || '')) || { n: null, p: {} };
+  const sig = pick.p['Signal'] || '';
+  const [e, s, t] = nums(pick.p['Entry · SL · TP']);
+  const side = /long/i.test(sig) ? 'long' : /short/i.test(sig) ? 'short' : 'idle';
+  const dist = e && s ? Math.abs(e - s) : null;
+  const rr = dist ? Math.abs(t - e) / dist : null;
+  const lots = dist && units > 0 ? risk / (dist * units) : null;
+  const toEntry = e && last ? last - e : null;
+  const eie = panels['EIE PRO'] || {}, sk = panels['SK SEQ'] || {};
+  const conflict = /CONFLICT/.test(sk['Filters'] || '');
+  const suspect = /⚠/.test(eie['Count check'] || '');
+  const noSource = /set source/.test(sk['Filters'] || '');
+  return html`<section class="card">
+    <h2><span>ACTIVE OPERATION</span><span>${pick.n || 'STANDBY'}</span></h2>
+    <div class="op">
+      <div class=${'state ' + side}>${side === 'idle' ? 'NO ACTIVE ORDER · STANDING BY' : sig.toUpperCase()}</div>
+      ${conflict && html`<div class="warn">⚠ EIE × SK CONFLICT · opposite directions · STAND DOWN</div>`}
+      ${suspect && html`<div class="warn amber">⚠ ELLIOTT COUNT SUSPECT · wave 4 overlaps wave 1 · trust SK structure, not the wave count</div>`}
+      ${noSource && html`<div class="warn amber">SK "Require EIE agreement" is on but its source is not set to EIE PRO: EIE direction</div>`}
+      ${side !== 'idle' && html`
+        <div class="lv">
+          <div><small>ENTRY</small><b style=${{ color: C.amber }}>${fmt(e)}</b></div>
+          <div><small>STOP</small><b style=${{ color: C.red }}>${fmt(s)}</b></div>
+          <div><small>TARGET</small><b style=${{ color: C.green }}>${fmt(t)}</b></div>
+        </div>`}
+      <div class="calc">
+        <div><label for="risk">RISK PER TRADE ($)</label><input id="risk" type="number" min="1" step="1" value=${risk} onInput=${ev => setRisk(+ev.target.value || 0)} /></div>
+        <div><label for="units">UNITS PER LOT</label><input id="units" type="number" min="1" step="1" value=${units} onInput=${ev => setUnits(+ev.target.value || 0)} /></div>
+      </div>
+      <div class="out">
+        ${side === 'idle' ? html`Sizing appears when a limit is placed. Gold CFD: 100 units/lot · WTI: 1000.`
+          : html`Size <b>${fmt(dist ? risk / dist : null, 2)} units</b> (${fmt(lots, 3)} lots) · R:R ${fmt(rr, 2)} · stop ${fmt(dist)} · price ${toEntry == null ? '—' : (toEntry >= 0 ? '+' : '') + fmt(toEntry)} from entry
+             ${dist && risk / dist < 1 ? html`<div style=${{ color: C.red, marginTop: '6px' }}>Stop too wide for $${risk} risk (under 1 unit): the bot skips this. Use a lower timeframe or raise risk.</div>` : null}`}
+      </div>
+    </div>
+  </section>`;
+}
+
+function Bot({ b }) {
+  if (!b) return null;
+  const pos = b.pos, ord = b.order;
+  return html`<section class="card">
+    <h2><span>AUTO-TRADER · ${b.mode.toUpperCase()}</span><span>${b.pnl >= 0 ? '+' : ''}${fmt(b.pnl)}</span></h2>
+    <table class="kv"><tbody>
+      <tr><td>Balance</td><td>${fmt(b.balance)}</td></tr>
+      <tr><td>Today</td><td>${b.dayTrades} trades · ${b.dayLosses} losses</td></tr>
+      <tr><td>Working order</td><td>${ord ? `${ord.side === 1 ? 'BUY' : 'SELL'} ${ord.units} @ ${ord.entry} · SL ${ord.sl} · TP ${ord.tp}` : '—'}</td></tr>
+      <tr><td>Position</td><td>${pos ? `${pos.side === 1 ? 'LONG' : 'SHORT'} ${pos.units} @ ${pos.entry} · SL ${pos.sl} · TP ${pos.tp}` : '—'}</td></tr>
+      ${b.note && html`<tr><td>Note</td><td style=${{ color: C.amber }}>${b.note}</td></tr>`}
+      ${(b.trades || []).slice().reverse().map((t, i) => html`<tr key=${i}><td>${(t.closed || '').slice(11, 19)} ${t.side}</td>
+        <td style=${{ color: t.pnl >= 0 ? C.green : C.red }}>${t.reason} ${t.pnl >= 0 ? '+' : ''}${t.pnl} (${t.R}R)</td></tr>`)}
+    </tbody></table>
+  </section>`;
+}
+
+
+// ── Matrix rain background (pauses when the tab is hidden or reduced motion is preferred) ──
+function MatrixRain({ on }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!on) return;
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) return;
+    const cv = ref.current, ctx = cv.getContext('2d');
+    const glyphs = 'アカサタナハマヤラワ0123456789ΣΔπ$€¥£XAUOILR'.split('');
+    let cols = [], raf = 0, last = 0, fs = 14;
+    const size = () => { cv.width = window.innerWidth; cv.height = window.innerHeight; cols = new Array(Math.ceil(cv.width / fs)).fill(0).map(() => Math.random() * -50); };
+    size(); window.addEventListener('resize', size);
+    const draw = (t) => {
+      raf = requestAnimationFrame(draw);
+      if (document.hidden || t - last < 55) return;
+      last = t;
+      ctx.fillStyle = 'rgba(4,7,6,0.12)'; ctx.fillRect(0, 0, cv.width, cv.height);
+      ctx.font = fs + 'px "Share Tech Mono", monospace';
+      cols.forEach((y, i) => {
+        const ch = glyphs[(Math.random() * glyphs.length) | 0];
+        ctx.fillStyle = Math.random() < 0.06 ? '#d8ffe9' : Math.random() < 0.5 ? '#2bd673' : '#16884a';
+        ctx.fillText(ch, i * fs, y * fs);
+        cols[i] = y * fs > cv.height && Math.random() > 0.975 ? 0 : y + 1;
+      });
+    };
+    raf = requestAnimationFrame(draw);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener('resize', size); ctx.clearRect(0, 0, cv.width, cv.height); };
+  }, [on]);
+  return html`<canvas ref=${ref} aria-hidden="true" style=${{ position: 'fixed', inset: 0, zIndex: 0, opacity: on ? 0.5 : 0, pointerEvents: 'none', transition: 'opacity .6s' }}></canvas>`;
+}
+
+function useCanvas(draw, deps) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const cv = ref.current; if (!cv) return;
+    const paint = () => {
+      const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      cv.width = Math.max(1, r.width * dpr); cv.height = Math.max(1, r.height * dpr);
+      const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw(ctx, r.width, r.height);
+    };
+    paint();
+    const ro = new ResizeObserver(paint); ro.observe(cv);
+    return () => ro.disconnect();
+  }, deps);
+  return ref;
+}
+
+const resColor = (r) => r === 1 ? C.green : r === -1 ? C.red : r === -2 ? C.amber : C.dim;
+
+// Fan chart: percentile bands + target / breach lines + live paths that draw themselves in
+function FanChart({ mc }) {
+  const [prog, setProg] = useState(1);
+  const liveKey = mc && mc.live ? mc.done + (mc.viz || 0) : 0;
+  useEffect(() => {
+    let raf, t0 = performance.now();
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) { setProg(1); return; }
+    const step = (t) => { const p = Math.min(1, (t - t0) / 1100); setProg(p); if (p < 1) raf = requestAnimationFrame(step); };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [liveKey]);
+  const ref = useCanvas((ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    if (!mc || !mc.bands) return;
+    const H = mc.rules.horizon, top = mc.rules.target + 1.5, bot = -mc.rules.maxLoss - 1.5;
+    const X = (k) => 44 + (w - 56) * k / H, Y = (v) => 10 + (h - 34) * (top - v) / (top - bot);
+    ctx.strokeStyle = 'rgba(18,53,36,.8)'; ctx.lineWidth = 1; ctx.font = '10px "JetBrains Mono", monospace'; ctx.fillStyle = C.dim;
+    for (let v = Math.ceil(bot / 2) * 2; v <= top; v += 2) { ctx.beginPath(); ctx.moveTo(44, Y(v)); ctx.lineTo(w - 12, Y(v)); ctx.stroke(); ctx.fillText((v > 0 ? '+' : '') + v + '%', 4, Y(v) + 3); }
+    for (let k = 0; k <= H; k += 25) ctx.fillText(k + '', X(k) - 6, h - 8);
+    const band = (lo, hi, a) => { const b = mc.bands; ctx.beginPath(); for (let k = 0; k <= H; k++) ctx.lineTo(X(k), Y(b[hi][k])); for (let k = H; k >= 0; k--) ctx.lineTo(X(k), Y(b[lo][k])); ctx.closePath(); ctx.fillStyle = `rgba(57,255,136,${a})`; ctx.fill(); };
+    band(0, 4, 0.07); band(1, 3, 0.13);
+    ctx.beginPath(); mc.bands[2].forEach((v, k) => ctx.lineTo(X(k), Y(v))); ctx.strokeStyle = C.green; ctx.lineWidth = 1.5; ctx.stroke();
+    const hline = (v, col, txt) => { ctx.setLineDash([6, 5]); ctx.beginPath(); ctx.moveTo(44, Y(v)); ctx.lineTo(w - 12, Y(v)); ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = col; ctx.fillText(txt, w - 140, Y(v) - 5); };
+    hline(mc.rules.target, C.green, `TARGET +${mc.rules.target}%`); hline(-mc.rules.maxLoss, C.red, `MAX LOSS −${mc.rules.maxLoss}%`); hline(0, 'rgba(184,245,207,.35)', '');
+    const kMax = Math.floor(H * prog);
+    (mc.live || []).forEach((p) => {
+      ctx.beginPath();
+      for (let k = 0; k <= kMax; k++) ctx.lineTo(X(k), Y(p.e[k]));
+      ctx.strokeStyle = resColor(p.r); ctx.globalAlpha = 0.55; ctx.lineWidth = 1; ctx.shadowColor = resColor(p.r); ctx.shadowBlur = 6; ctx.stroke();
+      ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+    });
+  }, [mc && mc.done, mc && mc.status, prog]);
+  return html`<canvas ref=${ref} role="img" aria-label="Monte Carlo equity fan chart" style=${{ width: '100%', height: '320px', display: 'block' }}></canvas>`;
+}
+
+function Hist({ bins, label, unit, step, color }) {
+  const ref = useCanvas((ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    if (!bins) return;
+    const tot = bins.reduce((a, b) => a + b, 0) || 1, mx = Math.max(...bins) || 1, n = bins.length, bw = (w - 8) / n;
+    bins.forEach((v, i) => { const bh = (h - 22) * v / mx; ctx.fillStyle = color; ctx.globalAlpha = 0.35 + 0.65 * (v / mx); ctx.fillRect(4 + i * bw, h - 16 - bh, Math.max(1, bw - 1), bh); });
+    ctx.globalAlpha = 1; ctx.fillStyle = C.dim; ctx.font = '10px "JetBrains Mono", monospace';
+    [0, Math.floor(n / 2), n - 1].forEach((i, j) => ctx.fillText((i * step) + unit, j === 2 ? w - 30 : 4 + i * bw, h - 3));
+    let c = 0, p95 = 0; for (let i = 0; i < n; i++) { c += bins[i]; if (c / tot >= 0.95) { p95 = i; break; } }
+    ctx.strokeStyle = C.amber; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(4 + (p95 + 0.5) * bw, 4); ctx.lineTo(4 + (p95 + 0.5) * bw, h - 16); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = C.amber; ctx.fillText('95%: ' + (p95 * step) + unit, Math.min(w - 70, 8 + (p95 + 0.5) * bw), 12);
+  }, [bins && bins.join(',')]);
+  return html`<div><div class="wr-sub">${label}</div><canvas ref=${ref} role="img" aria-label=${label} style=${{ width: '100%', height: '120px', display: 'block' }}></canvas></div>`;
+}
+
+function Conv({ conv }) {
+  const ref = useCanvas((ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    if (!conv || conv.length < 2) return;
+    const xs = conv.map(c => c[0]), ys = conv.map(c => c[1]);
+    const xm = Math.max(...xs), lo = Math.max(0, Math.min(...ys) - 0.02), hi = Math.min(1, Math.max(...ys) + 0.02);
+    ctx.beginPath(); conv.forEach(([x, y]) => ctx.lineTo(4 + (w - 8) * x / xm, h - 14 - (h - 22) * (y - lo) / ((hi - lo) || 1)));
+    ctx.strokeStyle = C.cyan; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = C.dim; ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.fillText((hi * 100).toFixed(1) + '%', 4, 10); ctx.fillText((lo * 100).toFixed(1) + '%', 4, h - 2);
+  }, [conv && conv.length, conv && conv.length && conv[conv.length - 1][0]]);
+  return html`<div><div class="wr-sub">PASS-RATE CONVERGENCE</div><canvas ref=${ref} role="img" aria-label="pass rate convergence" style=${{ width: '100%', height: '120px', display: 'block' }}></canvas></div>`;
+}
+
+function WarRoom({ mc, rain, setRain }) {
+  if (!mc) return null;
+  const pct = (x) => (x == null ? '—' : (100 * x).toFixed(1) + '%');
+  const prog = mc.target ? Math.min(1, mc.done / mc.target) : 0;
+  const tile = (name, v, col, note) => html`<div class="wr-tile"><small>${name}</small><b style=${{ color: col }}>${pct(v)}</b>
+    <div class="wr-bar"><i style=${{ width: (100 * (v || 0)) + '%', background: col }}></i></div><span>${note}</span></div>`;
+  return html`<section class="card bottom warroom">
+    <h2><span>MONTE CARLO WAR ROOM · ${mc.status === 'running' ? html`<b class="blinkg">● SIMULATING</b>` : mc.status === 'complete' ? 'COMPLETE' : 'WAITING'}</span>
+      <span><button class="wr-btn" onClick=${() => setRain(!rain)}>${rain ? 'RAIN ON' : 'RAIN OFF'}</button></span></h2>
+    ${mc.status === 'waiting' ? html`<div class="empty">Waiting for data: ${mc.note}. ${mc.cores} cores standing by.</div>` : html`
+    <div class="wr-head">
+      <div><small>SOURCE</small><b>${mc.source.label}</b><span>${mc.source.n} trades · win ${pct(mc.source.wr)} · ${mc.source.avgR >= 0 ? '+' : ''}${mc.source.avgR}R avg</span></div>
+      <div><small>MODEL</small><b>win +${mc.model.W.toFixed(2)}R · loss ${mc.model.L.toFixed(2)}R</b><span>${mc.model.bayes ? 'Bayesian win rate per path (small-sample honest)' : 'fixed win rate'}</span></div>
+      <div><small>RULES</small><b>${mc.rules.risk}% risk · +${mc.rules.target}% / −${mc.rules.maxLoss}%</b><span>daily −${mc.rules.dailyLoss}% · ${mc.rules.perDay} trades/day · ${mc.rules.horizon} trades max</span></div>
+      <div><small>ENGINE</small><b>${Math.round(mc.pps).toLocaleString()} paths/s · ${mc.cores} cores</b><span>${mc.done.toLocaleString()} / ${mc.target.toLocaleString()} paths · ${mc.elapsed.toFixed(1)} s${mc.viz ? ' · live +' + mc.viz.toLocaleString() : ''}</span></div>
+    </div>
+    <div class="wr-prog"><i style=${{ width: (100 * prog) + '%' }}></i></div>
+    <div class="wr-tiles">
+      ${tile('PASS (+target first)', mc.pass, C.green, mc.ttp ? `median ≈ ${Math.round(mc.ttp)} trades to pass` : '')}
+      ${tile('BREACH (max loss)', mc.breach, C.red, 'static from starting balance')}
+      ${tile('DAILY LIMIT HIT', mc.daily, C.amber, `−${mc.rules.dailyLoss}% in one day`)}
+      ${tile('STILL OPEN', mc.open, C.dim, `after ${mc.rules.horizon} trades`)}
+    </div>
+    <${FanChart} mc=${mc} />
+    <div class="wr-legend"><span><i style=${{ background: C.green }}></i>passed</span><span><i style=${{ background: C.red }}></i>breached</span><span><i style=${{ background: C.amber }}></i>daily limit</span><span><i style=${{ background: C.dim }}></i>undecided</span><span>bands: 5–95% and 25–75% of paths · line: median</span></div>
+    <div class="wr-grid">
+      <${Hist} bins=${mc.ddBins} label="MAX DRAWDOWN DISTRIBUTION" unit="%" step=${0.5} color=${C.red} />
+      <${Hist} bins=${mc.stBins} label="LONGEST LOSING STREAK" unit="" step=${1} color=${C.violet} />
+      <${Conv} conv=${mc.conv} />
+    </div>`}
+  </section>`;
+}
+
+function SyncStrip({ st }) {
+  const sy = st.sync, now = Date.now();
+  const ago = (t) => t == null ? '—' : Math.max(0, Math.round((now - t) / 1000)) + 's ago';
+  const fresh = sy && sy.panelsAt && now - sy.panelsAt < 10000;
+  const want = ['Elliott Impulse', 'SK Sequence'];
+  return html`<div class="sync" aria-label="indicator sync status">
+    <span class="pill">SYNC ${fresh ? html`<b class="ok">● LIVE</b>` : html`<b class="bad">● STALE</b>`} · panels ${sy ? ago(sy.panelsAt) : '—'} · read ${sy ? sy.readMs : '—'} ms</span>
+    ${want.map((w) => { const x = sy && (sy.studies || []).find(o => o.name.indexOf(w) >= 0);
+      return html`<span class="pill" key=${w}>${x ? html`<b class="ok">✓</b> ${x.name.split(' (')[0]} · settings #${x.fp} · ${x.changedAt ? html`<b class="warn">changed ${ago(x.changedAt)}</b>` : 'unchanged since start'}`
+        : html`<b class="bad">✗</b> ${w} not found on chart`}</span>`; })}
+    ${sy && sy.checkedAt ? html`<span class="pill">settings checked ${ago(sy.checkedAt)} (every 15 s)</span>` : null}
+  </div>`;
+}
+
+function Telemetry({ tele, mc }) {
+  const ref = useRef(null);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [tele && tele.feed && tele.feed.length, tele && tele.feed && tele.feed[tele.feed.length - 1]]);
+  if (!tele) return null;
+  const cls = (l) => /\[mc\]/.test(l) ? 't-mc' : /\[sync\]/.test(l) ? 't-sync' : /\[draw\]/.test(l) ? 't-draw' : '';
+  const up = tele.uptime, hh = Math.floor(up / 3600), mm = Math.floor(up / 60) % 60, ss = Math.floor(up) % 60;
+  return html`<section class="card bottom">
+    <h2><span>SYSTEM TELEMETRY · ENGINE LOG</span><span>${tele.workers} worker cores · ${tele.batches.toLocaleString()} batches</span></h2>
+    <div class="tele-grid">
+      <div class="term" ref=${ref} role="log" aria-live="off">
+        ${tele.feed.map((l, i) => html`<div key=${l + i} class=${cls(l)}>${l}</div>`)}
+        <div><span class="cursor"></span></div>
+      </div>
+      <div>
+        <div class="cores">${(tele.busy || []).map((b, i) => html`<div class=${'core' + (b ? ' busy' : '')} key=${i}><span>CORE ${i + 1}</span><div class="bar"><i></i></div><span>${b ? 'BUSY' : 'idle'}</span></div>`)}</div>
+        <div class="tstat">
+          <div><small>UPTIME</small><b>${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}</b></div>
+          <div><small>CHART READS</small><b>${tele.reads.toLocaleString()}</b></div>
+          <div><small>LAST READ</small><b>${tele.readMs} ms</b></div>
+          <div><small>EVENTS / MIN</small><b>${tele.evPerMin}</b></div>
+          <div><small>MEMORY</small><b>${tele.rssMB.toFixed(0)} MB</b></div>
+          <div><small>HEAP</small><b>${tele.heapMB.toFixed(0)} MB</b></div>
+          <div><small>MC PATHS</small><b>${mc && mc.done ? (mc.done + (mc.viz || 0)).toLocaleString() : '—'}</b></div>
+          <div><small>MC SPEED</small><b>${mc && mc.pps ? Math.round(mc.pps).toLocaleString() + '/s' : '—'}</b></div>
+        </div>
+      </div>
+    </div>
+  </section>`;
+}
+
+const tagClass = (t) => /BOT_(ORDER|MOVE)|PLACE/.test(t) && !/SKIP/.test(t) ? 't-place' : /PLACE/.test(t) ? 't-place' : /FILL/.test(t) ? 't-fill' : /CANCEL|INVALID|SUSPECT|UNEXPECTED|NO_IND/.test(t) ? 't-cancel'
+  : /CLOSED|WIN|OK/.test(t) ? 't-close' : /MOVE/.test(t) ? 't-move' : 't-info';
+
+function Log({ events }) {
+  return html`<section class="card bottom">
+    <h2><span>INTERCEPT LOG</span><span>${events.length} RECORDS</span></h2>
+    <div class="log" role="log" aria-live="polite">
+      ${events.length ? events.slice().reverse().map((e, i) => html`<div key=${e.ts + i}>
+        <time>${(e.ts || '').slice(11, 19)}</time><span class=${'tag ' + tagClass(e.type)}>${e.type}</span>${e.symbol ? e.symbol + ' · ' : ''}${e.msg || ''}</div>`)
+        : html`<div class="empty">Awaiting intercepts…</div>`}
+    </div>
+  </section>`;
+}
+
+function App() {
+  const [st, setSt] = useState({ connected: false, demo: false, panels: {}, bars: [], events: [] });
+  const [dir, setDir] = useState('');
+  const [rain, setRainS] = useState(store.get('aurum.rain', true));
+  const setRain = (v) => { setRainS(v); store.set('aurum.rain', v); };
+  const prev = useRef(null);
+  useEffect(() => {
+    let es;
+    const apply = (s) => {
+      if (prev.current != null && s.last != null && s.last !== prev.current) setDir(s.last > prev.current ? 'up' : 'dn');
+      prev.current = s.last;
+      setSt(s);
+    };
+    const poll = () => fetch('/api/state').then(r => r.json()).then(apply).catch(() => setSt(x => ({ ...x, connected: false })));
+    try {
+      es = new EventSource('/api/stream');
+      es.onmessage = (m) => { try { apply(JSON.parse(m.data)); } catch {} };
+      es.onerror = () => { es.close(); const id = setInterval(poll, 2000); es = { close: () => clearInterval(id) }; };
+    } catch { poll(); }
+    return () => es && es.close();
+  }, []);
+  const levels = useMemo(() => levelsFrom(st.panels || {}), [JSON.stringify(st.panels)]);
+  const link = st.demo ? 'demo' : st.connected ? 'on' : 'off';
+  return html`<${MatrixRain} on=${rain} /><div class="wrap">
+    <div class="banner">CLASSIFIED // EYES ONLY // AURUM-7 // FICTIONAL TRAINING TERMINAL</div>
+    <header>
+      <div>
+        <div class="title"><${Decode} text="OPERATION AURUM" /><span class="cur">_</span></div>
+        <div class="sub">SIGNALS INTELLIGENCE TERMINAL · EIE PRO × SK SEQ</div>
+      </div>
+      <div class="status">
+        <span><i class=${'dot ' + link}></i>${link === 'demo' ? 'DEMO FEED' : link === 'on' ? 'TV BRIDGE LINKED' : 'NO LINK'}</span>
+        <span>TARGET <b>${st.symbol || '—'}</b> · <b>${st.tf ? st.tf + 'm' : '—'}</b></span>
+        <${Clock} />
+        <span class=${'price ' + dir}>${fmt(st.last)}</span>
+      </div>
+    </header>
+    <${SyncStrip} st=${st} />
+    <div class="grid">
+      <section class="card trackcard">
+        <h2><span>TARGET TRACK · ${st.symbol || '—'}</span><span>${st.bars?.length || 0} BARS</span></h2>
+        <${Chart} bars=${st.bars} levels=${levels} ov=${st.overlays} />
+        <div class="legend">
+          <span><i style=${{ background: C.amber }}></i>entry</span><span><i style=${{ background: C.red }}></i>stop / invalidation</span>
+          <span><i style=${{ background: C.green }}></i>target</span><span><i style=${{ background: C.violet }}></i>SK 0 · A · B</span>
+          <span><i style=${{ background: C.cyan }}></i>SK C · ST trail</span><span>● EIE waves · ■ SK points · dotted bands = indicator zones</span>
+        </div>
+      </section>
+      <div class="side">
+        <${Operation} panels=${st.panels || {}} last=${st.last} />
+        <${Bot} b=${st.broker} />
+        <${Dossier} name="EIE PRO" rows=${(st.panels || {})['EIE PRO']} />
+        <${Dossier} name="SK SEQ" rows=${(st.panels || {})['SK SEQ']} />
+      </div>
+    </div>
+    <${WarRoom} mc=${st.mc} rain=${rain} setRain=${setRain} />
+    <${Telemetry} tele=${st.tele} mc=${st.mc} />
+    <${Log} events=${st.events || []} />
+    <footer>Unofficial personal tool · reads your local TradingView Desktop · not financial advice</footer>
+  </div>`;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`);
+</script>
+</body>
+</html>
